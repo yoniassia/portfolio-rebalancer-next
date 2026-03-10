@@ -1,5 +1,5 @@
 import { create } from 'zustand';
-import { persist } from 'zustand/middleware';
+import { persist, createJSONStorage } from 'zustand/middleware';
 import {
   RebalanceStep,
   type PortfolioAnalysis,
@@ -420,6 +420,7 @@ export const useRebalanceStore = create<RebalanceState>()(
     }),
     {
       name: 'rebalancer-store',
+      storage: createJSONStorage(() => localStorage),
       partialize: (state) => ({
         step: state.step,
         apiKey: state.apiKey,
@@ -440,6 +441,7 @@ export const useRebalanceStore = create<RebalanceState>()(
         riskLevel: state.riskLevel,
         optimizationMethod: state.optimizationMethod,
       }),
+      skipHydration: true,
     },
   ),
 );

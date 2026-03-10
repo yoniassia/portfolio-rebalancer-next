@@ -1,6 +1,5 @@
 import { STEPS } from '../../constants/steps';
 import { cn } from '../../utils/cn';
-import { NotificationBell } from '../shared/NotificationBell';
 import type { RebalanceStep } from '../../types/rebalancer';
 
 interface StepHeaderProps {
@@ -46,11 +45,7 @@ export function StepHeader({ currentStep, onBack, showBack }: StepHeaderProps) {
             <h1 className="text-lg font-semibold truncate" style={{ color: 'var(--text-primary)' }}>{info.label}</h1>
             <p className="text-xs" style={{ color: 'var(--text-secondary)' }}>{info.description}</p>
           </div>
-          
-          {/* Notification Bell */}
-          <div className="ml-2">
-            <NotificationBell />
-          </div>
+
         </div>
         <div className="flex gap-1.5 mt-2">
           {STEPS.map((s, i) => (
