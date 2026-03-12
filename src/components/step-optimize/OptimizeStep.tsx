@@ -77,6 +77,7 @@ export function OptimizeStep({ portfolio, onOptimize, onApply, isOptimizing, pro
   const [addNew, setAddNew] = useState(true);
   const [newCount, setNewCount] = useState(3);
   const [disabledNewInstruments, setDisabledNewInstruments] = useState<Set<number>>(new Set());
+  const [error, setError] = useState<string | null>(null);
 
   const canOptimize = holdingCount >= 2;
   const effectiveM = addNew ? newCount : 0;
@@ -111,11 +112,16 @@ export function OptimizeStep({ portfolio, onOptimize, onApply, isOptimizing, pro
 
   const handleOptimize = async () => {
     const risk = RISK_LEVELS[riskLevel - 1]!;
+    setError(null);
     try {
       const optimResult = await onOptimize(risk.method, { ...risk.params, m: effectiveM });
       if (optimResult) setScreen('results');
-    } catch {
-      // Error handled upstream
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : 'Optimization failed';
+      setError(msg);
+      if (msg.toLowerCase().includes('not authenticated') || msg.toLowerCase().includes('401')) {
+        setTimeout(() => { window.location.href = '/api/auth/login'; }, 1500);
+      }
     }
   };
 
@@ -223,6 +229,15 @@ export function OptimizeStep({ portfolio, onOptimize, onApply, isOptimizing, pro
               <div style={{ height: 4, borderRadius: 99, background: 'var(--bg-input)' }}>
                 <div style={{ height: '100%', borderRadius: 99, width: `${progress.total > 0 ? (progress.current / progress.total) * 100 : 0}%`, background: '#00c853', transition: 'width 0.3s' }} />
               </div>
+            </div>
+          )}
+
+          {error && (
+            <div style={{ borderRadius: 10, padding: 12, background: 'rgba(239,68,68,0.12)', color: '#ef4444', fontSize: 13, fontWeight: 500 }}>
+              {error}
+              {(error.toLowerCase().includes('not authenticated') || error.toLowerCase().includes('401')) && (
+                <div style={{ fontSize: 11, marginTop: 4, color: '#ef444499' }}>Redirecting to login...</div>
+              )}
             </div>
           )}
         </div>

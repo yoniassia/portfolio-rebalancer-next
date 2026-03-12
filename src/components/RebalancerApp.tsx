@@ -85,7 +85,7 @@ export function RebalancerApp() {
   };
 
   useEffect(() => {
-    if (step === RebalanceStep.Portfolio && !portfolio) loadPortfolio();
+    if (!portfolio && step >= RebalanceStep.Portfolio) loadPortfolio();
   }, [step, portfolio]);
 
   const handleConnect = async (apiKey: string, userKey: string, connectMode: 'demo' | 'sso', accountType?: 'real' | 'demo') => {
@@ -278,6 +278,14 @@ export function RebalancerApp() {
             onNext={() => setStep(RebalanceStep.Optimize)}
             isDemo={isDemo}
           />
+        )}
+        {step === RebalanceStep.Optimize && !portfolio && (
+          <div className="flex-1 flex items-center justify-center">
+            <div style={{ textAlign: 'center', color: 'var(--text-secondary)' }}>
+              <div style={{ fontSize: 24, marginBottom: 8 }}>⏳</div>
+              <div style={{ fontSize: 14 }}>Loading portfolio...</div>
+            </div>
+          </div>
         )}
         {step === RebalanceStep.Optimize && portfolio && (
           <OptimizeStep
