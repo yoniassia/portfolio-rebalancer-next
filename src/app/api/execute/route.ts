@@ -19,10 +19,9 @@ interface ExecuteBody {
 }
 
 function makeHeaders(bearerToken: string) {
+  // Execution endpoints use Bearer ONLY — mixing with x-api-key/x-user-key causes 422
   return {
     Authorization: `Bearer ${bearerToken}`,
-    'x-api-key': process.env.ETORO_API_KEY || '',
-    'x-user-key': process.env.ETORO_USER_KEY || '',
     'x-request-id': randomUUID(),
     'Content-Type': 'application/json',
     'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',

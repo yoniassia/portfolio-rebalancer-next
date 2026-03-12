@@ -20,6 +20,7 @@ const CANDLE_CONCURRENCY = 5;
 
 interface OptimizeBody {
   directHoldings: PortfolioHolding[];
+  copyInstrumentIds?: number[];
   method?: OptimizationMethod;
   m?: number;
   riskAversion?: number;
@@ -113,7 +114,9 @@ export async function POST(req: NextRequest) {
     let candidates: CandidateInstrument[] = [];
     if (m > 0) {
       try {
-        const heldIds = directHoldings.map((h) => h.instrumentId);
+        const directIds = directHoldings.map((h) => h.instrumentId);
+        const copyIds = body.copyInstrumentIds ?? [];
+        const heldIds = [...directIds, ...copyIds];
         const heldTypeIds = directHoldings.map((h) => h.instrumentTypeId ?? 5);
 
         const stage1 = await fetchCandidates({

@@ -139,8 +139,9 @@ export function PortfolioStep({ portfolio, onNext, isDemo }: PortfolioStepProps)
       : 0;
     const riskBalanceScore = Math.round(Math.max(0, 100 - cashDragPenalty - topHeavyPenalty));
 
-    // Composite health score
-    const healthScore = Math.round(concentrationScore * 0.40 + effectiveN / Math.max(1, n) * 100 * 0.30 + riskBalanceScore * 0.30);
+    // Composite health score (each component capped at 100)
+    const diversificationScore = Math.min(100, Math.round(effectiveN / Math.max(1, n) * 100));
+    const healthScore = Math.round(concentrationScore * 0.40 + diversificationScore * 0.30 + riskBalanceScore * 0.30);
 
     // Sort for display
     const sortedByWeight = h.map((holding, i) => ({
@@ -186,6 +187,7 @@ export function PortfolioStep({ portfolio, onNext, isDemo }: PortfolioStepProps)
 
     return {
       concentrationScore,
+      diversificationScore,
       effectiveN,
       riskBalanceScore,
       healthScore,
@@ -266,6 +268,7 @@ export function PortfolioStep({ portfolio, onNext, isDemo }: PortfolioStepProps)
             </div>
             <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
               {scoreBar(analysis.concentrationScore, '#10b981', 'Concentration')}
+              {scoreBar(analysis.diversificationScore, '#6366f1', 'Diversification')}
               {scoreBar(analysis.riskBalanceScore, '#f59e0b', 'Risk Balance')}
             </div>
           </div>

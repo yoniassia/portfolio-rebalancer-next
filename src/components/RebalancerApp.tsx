@@ -120,6 +120,7 @@ export function RebalancerApp() {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           directHoldings: holdingsWithWeight,
+          copyInstrumentIds: (portfolio?.copyHoldings ?? []).map(h => h.instrumentId),
           method,
           m: params.m ?? 5,
           riskAversion: params.riskAversion ?? 2.5,
