@@ -5,7 +5,6 @@ import { Spinner } from '../shared/Spinner';
 import { BottomBar } from '../layout/BottomBar';
 import { Button } from '../shared/Button';
 import { formatCurrency } from '../../utils/format';
-import { EXECUTION_PHASES } from '../../constants/steps';
 import type { TradeProgress, ExecutionPhase, RebalancePlan, PortfolioAnalysis } from '../../types/rebalancer';
 
 interface ExecuteStepProps {
@@ -15,6 +14,7 @@ interface ExecuteStepProps {
   portfolio: PortfolioAnalysis | null;
   onExecute: () => void;
   onViewResults: () => void;
+  onCancelOrder?: (orderId: number) => void;
   driftThreshold: number;
   maxPositionWeight: number;
   slippageTolerance: number;
@@ -24,17 +24,21 @@ interface ExecuteStepProps {
 }
 
 const statusVariant = (s: TradeProgress['status']) => {
-  if (s === 'success') return 'success' as const;
-  if (s === 'failed') return 'error' as const;
+  if (s === 'success' || s === 'limit-filled') return 'success' as const;
+  if (s === 'failed' || s === 'limit-cancelled') return 'error' as const;
   if (s === 'executing') return 'info' as const;
+  if (s === 'limit-pending') return 'warning' as const;
   if (s === 'skipped') return 'warning' as const;
   return 'neutral' as const;
 };
 
 const statusLabel = (s: TradeProgress['status']) => {
-  if (s === 'success') return 'Done';
+  if (s === 'success') return 'Filled';
+  if (s === 'limit-filled') return 'Limit Filled';
+  if (s === 'limit-pending') return 'Limit Pending';
+  if (s === 'limit-cancelled') return 'Cancelled';
   if (s === 'failed') return 'Failed';
-  if (s === 'executing') return 'Running';
+  if (s === 'executing') return 'Executing';
   if (s === 'skipped') return 'Skipped';
   return 'Pending';
 };
@@ -51,9 +55,16 @@ const actionVariant = (a: TradeProgress['action']) => {
   return 'warning' as const;
 };
 
+const phaseLabels: Record<string, string> = {
+  closing: '📉 Closing Positions',
+  'partial-closing': '📉 Reducing Positions',
+  opening: '📈 Opening Positions',
+  polling: '⏳ Waiting for Limit Orders',
+};
+
 export function ExecuteStep({
   plan, trades, phase, portfolio,
-  onExecute, onViewResults,
+  onExecute, onViewResults, onCancelOrder,
   driftThreshold, maxPositionWeight, slippageTolerance,
   onDriftThresholdChange, onMaxPositionWeightChange, onSlippageToleranceChange,
 }: ExecuteStepProps) {
@@ -61,75 +72,68 @@ export function ExecuteStep({
 
   const isIdle = phase === 'idle';
   const isComplete = phase === 'complete' || phase === 'failed';
-  const isExecuting = !isIdle && !isComplete;
-  const successCount = trades.filter((t) => t.status === 'success').length;
-  const failCount = trades.filter((t) => t.status === 'failed').length;
+  const isPolling = phase === 'polling';
+  const isExecuting = !isIdle && !isComplete && !isPolling;
 
-  // Build trade list from plan if trades not yet populated
+  const successCount = trades.filter((t) => t.status === 'success' || t.status === 'limit-filled').length;
+  const failCount = trades.filter((t) => t.status === 'failed').length;
+  const pendingCount = trades.filter((t) => t.status === 'limit-pending').length;
+  const cancelledCount = trades.filter((t) => t.status === 'limit-cancelled').length;
+
   const displayTrades = trades.length > 0 ? trades : [
     ...(plan?.fullCloses ?? []).map(t => ({ ...t, status: 'pending' as const })),
     ...(plan?.partialCloses ?? []).map(t => ({ ...t, status: 'pending' as const })),
     ...(plan?.opens ?? []).map(t => ({ ...t, status: 'pending' as const })),
   ];
 
-  // Pre-flight checks
   const closeTrades = displayTrades.filter(t => t.action === 'full-close' || t.action === 'partial-close');
   const buyTrades = displayTrades.filter(t => t.action === 'buy');
   const totalSellAmount = closeTrades.reduce((s, t) => s + t.amount, 0);
   const totalBuyAmount = buyTrades.reduce((s, t) => s + t.amount, 0);
   const cashAvailable = (portfolio?.availableCash ?? 0) + totalSellAmount;
-  const cashSufficient = cashAvailable >= totalBuyAmount * 0.95; // 5% buffer
+  const cashSufficient = cashAvailable >= totalBuyAmount * 0.95;
 
   return (
     <div className="flex flex-col flex-1">
       <div className="flex-1 px-4 py-4 space-y-4 overflow-y-auto" style={{ paddingBottom: 80 }}>
 
-        {/* Phase indicator (only during execution) */}
-        {!isIdle && (
-          <div style={{ display: 'flex', gap: 6 }}>
-            {EXECUTION_PHASES.map((p) => {
-              const isActive = phase === p.id;
-              const isPast = (
-                (p.id === 'closing' && (phase === 'partial-closing' || phase === 'opening' || phase === 'complete')) ||
-                (p.id === 'partial-closing' && (phase === 'opening' || phase === 'complete'))
-              );
-              return (
-                <div key={p.id} style={{
-                  flex: 1, borderRadius: 8, padding: '6px 4px', textAlign: 'center', fontSize: 11, fontWeight: 600,
-                  background: isActive ? 'rgba(59,130,246,0.12)' : isPast ? 'rgba(0,200,83,0.12)' : 'var(--bg-card)',
-                  color: isActive ? '#3b82f6' : isPast ? '#00c853' : 'var(--text-tertiary)',
-                  border: isActive ? '1px solid #3b82f6' : '1px solid var(--border)',
-                }}>
-                  {p.title}
-                </div>
-              );
-            })}
-          </div>
-        )}
-
-        {/* Execution in progress spinner */}
-        {isExecuting && trades.some(t => t.status === 'executing') && (
-          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 8, padding: 8 }}>
+        {/* Phase banner */}
+        {(isExecuting || isPolling) && (
+          <div style={{
+            borderRadius: 12, padding: '12px 16px',
+            background: isPolling ? 'rgba(245,158,11,0.08)' : 'rgba(59,130,246,0.08)',
+            border: `1px solid ${isPolling ? '#f59e0b30' : '#3b82f630'}`,
+            display: 'flex', alignItems: 'center', gap: 10,
+          }}>
             <Spinner size="sm" />
-            <span style={{ fontSize: 13, color: 'var(--text-primary)' }}>Executing trades...</span>
+            <div>
+              <div style={{ fontSize: 14, fontWeight: 700, color: isPolling ? '#f59e0b' : '#3b82f6' }}>
+                {phaseLabels[phase] ?? 'Executing...'}
+              </div>
+              {isPolling && (
+                <div style={{ fontSize: 11, color: 'var(--text-tertiary)', marginTop: 2 }}>
+                  {pendingCount} limit order{pendingCount !== 1 ? 's' : ''} pending — polling every 30s
+                </div>
+              )}
+            </div>
           </div>
         )}
 
         {/* Completion banner */}
-        {isComplete && (() => {
+        {(isComplete || (isPolling && pendingCount === 0)) && (() => {
           const skippedCount = trades.filter(t => t.status === 'skipped').length;
-          const authExpired = trades.some(t => t.error?.includes('session expired') || t.error?.includes('re-login'));
-          const marketClosed = trades.filter(t => t.error?.includes('Market closed'));
+          const authExpired = trades.some(t => t.error?.includes('session expired') || t.error?.includes('re-login') || t.error?.includes('AUTH_EXPIRED'));
+          const allOk = failCount === 0 && cancelledCount === 0;
           return (
             <div style={{
               borderRadius: 12, padding: 14, textAlign: 'center',
-              background: failCount === 0 ? 'rgba(0,200,83,0.12)' : failCount === trades.length ? 'rgba(239,68,68,0.12)' : 'rgba(245,158,11,0.12)',
+              background: allOk ? 'rgba(0,200,83,0.12)' : failCount === trades.length ? 'rgba(239,68,68,0.12)' : 'rgba(245,158,11,0.12)',
             }}>
-              <div style={{ fontSize: 18, fontWeight: 700, color: failCount === 0 ? '#00c853' : failCount === trades.length ? '#ef4444' : '#f59e0b' }}>
-                {failCount === 0 ? '✅ All Trades Executed' : failCount === trades.length ? '❌ All Trades Failed' : `⚠️ ${successCount}/${trades.length} Executed`}
+              <div style={{ fontSize: 18, fontWeight: 700, color: allOk ? '#00c853' : failCount === trades.length ? '#ef4444' : '#f59e0b' }}>
+                {allOk ? '✅ All Trades Executed' : failCount === trades.length ? '❌ All Trades Failed' : `⚠️ ${successCount}/${trades.length} Executed`}
               </div>
               <div className="mono" style={{ fontSize: 13, marginTop: 4, color: 'var(--text-secondary)' }}>
-                {successCount} succeeded · {failCount} failed · {skippedCount} skipped
+                {successCount} filled · {failCount} failed · {skippedCount} skipped · {cancelledCount} cancelled
               </div>
               {authExpired && (
                 <div style={{ marginTop: 8, padding: '8px 12px', borderRadius: 8, background: 'rgba(239,68,68,0.08)', border: '1px solid #ef444430' }}>
@@ -146,21 +150,13 @@ export function ExecuteStep({
                   </button>
                 </div>
               )}
-              {marketClosed.length > 0 && (
-                <div style={{ marginTop: 8, padding: '8px 12px', borderRadius: 8, background: 'rgba(245,158,11,0.08)', border: '1px solid #f59e0b30', fontSize: 12, color: '#f59e0b' }}>
-                  🕐 {marketClosed.length} trade{marketClosed.length > 1 ? 's' : ''} skipped — market closed
-                </div>
-              )}
               {failCount > 0 && !authExpired && (
                 <div style={{ marginTop: 8 }}>
-                  <button
-                    onClick={onExecute}
-                    style={{
-                      padding: '6px 16px', borderRadius: 8, fontSize: 12, fontWeight: 600,
-                      background: 'rgba(59,130,246,0.12)', color: '#3b82f6', border: '1px solid #3b82f630',
-                      cursor: 'pointer',
-                    }}
-                  >
+                  <button onClick={onExecute} style={{
+                    padding: '6px 16px', borderRadius: 8, fontSize: 12, fontWeight: 600,
+                    background: 'rgba(59,130,246,0.12)', color: '#3b82f6', border: '1px solid #3b82f630',
+                    cursor: 'pointer',
+                  }}>
                     🔄 Retry Failed Trades
                   </button>
                 </div>
@@ -169,18 +165,16 @@ export function ExecuteStep({
           );
         })()}
 
-        {/* Trade Plan (idle state) */}
+        {/* Pre-flight (idle) */}
         {isIdle && plan && (
           <div>
             <div style={{ fontSize: 10, color: 'var(--text-tertiary)', fontWeight: 600, letterSpacing: 1, marginBottom: 8 }}>
               TRADE PLAN ({displayTrades.length} trades)
             </div>
-
-            {/* Pre-flight checks */}
             <div style={{ display: 'flex', flexDirection: 'column', gap: 6, marginBottom: 12 }}>
               {[
-                { ok: displayTrades.length > 0, label: `${displayTrades.length} trades planned`, detail: `${closeTrades.length} sells, ${buyTrades.length} buys` },
-                { ok: cashSufficient, label: cashSufficient ? 'Sufficient cash' : 'Insufficient cash', detail: `Need ${formatCurrency(totalBuyAmount)}, have ${formatCurrency(cashAvailable)}` },
+                { ok: displayTrades.length > 0, label: `${displayTrades.length} trades planned`, detail: `${closeTrades.length} sells → ${buyTrades.length} buys` },
+                { ok: cashSufficient, label: cashSufficient ? 'Cash sufficient' : 'Insufficient cash', detail: `Need ${formatCurrency(totalBuyAmount)}, available ${formatCurrency(cashAvailable)}` },
               ].map((check, i) => (
                 <div key={i} style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '6px 10px', borderRadius: 8, background: check.ok ? 'rgba(0,200,83,0.06)' : 'rgba(239,68,68,0.06)', border: `1px solid ${check.ok ? '#00c85330' : '#ef444430'}` }}>
                   <span style={{ fontSize: 14 }}>{check.ok ? '✅' : '⚠️'}</span>
@@ -191,39 +185,51 @@ export function ExecuteStep({
                 </div>
               ))}
             </div>
+
+            <div style={{
+              padding: '8px 10px', borderRadius: 8, fontSize: 11, color: 'var(--text-tertiary)',
+              background: 'rgba(59,130,246,0.04)', border: '1px solid rgba(59,130,246,0.1)',
+            }}>
+              📋 Closes execute first (freeing cash). If a market is closed, a limit order is placed at last price ±0.3% buffer. Buys start after closes complete.
+            </div>
           </div>
         )}
 
-        {/* Trade list */}
-        <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
-          {displayTrades.map((t, i) => (
-            <div key={i} style={{ borderRadius: 10, padding: '10px 12px', border: '1px solid var(--border)', background: 'var(--bg-card)' }}>
-              <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 4 }}>
-                <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
-                  <Badge variant={actionVariant(t.action)}>{actionLabel(t.action)}</Badge>
-                  <span style={{ fontWeight: 600, fontSize: 13, color: 'var(--text-primary)' }}>{t.symbol}</span>
-                </div>
-                {'status' in t && <Badge variant={statusVariant(t.status)}>{statusLabel(t.status)}</Badge>}
-              </div>
-              <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 11, color: 'var(--text-secondary)' }}>
-                <span className="mono">{formatCurrency('actualAmount' in t && t.actualAmount ? t.actualAmount : t.amount)}</span>
-                <span>{t.reason}</span>
-              </div>
-              {'error' in t && t.error && (
-                <div style={{ fontSize: 11, marginTop: 4, color: '#ef4444' }}>{t.error}</div>
-              )}
+        {/* Grouped trade lists */}
+        {closeTrades.length > 0 && (
+          <div>
+            <div style={{ fontSize: 10, color: 'var(--text-tertiary)', fontWeight: 600, letterSpacing: 1, marginBottom: 6 }}>
+              PHASE 1 — CLOSE ({closeTrades.length})
             </div>
-          ))}
-
-          {displayTrades.length === 0 && (
-            <div style={{ textAlign: 'center', padding: 24 }}>
-              <Spinner size="lg" />
-              <div style={{ fontSize: 13, marginTop: 8, color: 'var(--text-secondary)' }}>Preparing trades...</div>
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+              {closeTrades.map((t, i) => (
+                <TradeCard key={`close-${i}`} trade={t} onCancel={onCancelOrder} />
+              ))}
             </div>
-          )}
-        </div>
+          </div>
+        )}
 
-        {/* Advanced Settings (collapsed) */}
+        {buyTrades.length > 0 && (
+          <div>
+            <div style={{ fontSize: 10, color: 'var(--text-tertiary)', fontWeight: 600, letterSpacing: 1, marginBottom: 6 }}>
+              PHASE 2 — BUY ({buyTrades.length})
+            </div>
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+              {buyTrades.map((t, i) => (
+                <TradeCard key={`buy-${i}`} trade={t} onCancel={onCancelOrder} />
+              ))}
+            </div>
+          </div>
+        )}
+
+        {displayTrades.length === 0 && (
+          <div style={{ textAlign: 'center', padding: 24 }}>
+            <Spinner size="lg" />
+            <div style={{ fontSize: 13, marginTop: 8, color: 'var(--text-secondary)' }}>Preparing trades...</div>
+          </div>
+        )}
+
+        {/* Advanced Settings */}
         {isIdle && (
           <div>
             <button
@@ -240,30 +246,9 @@ export function ExecuteStep({
             </button>
             {showAdvanced && (
               <div style={{ marginTop: 8, display: 'flex', flexDirection: 'column', gap: 12, padding: '12px 14px', background: 'var(--bg-card)', borderRadius: 10, border: '1px solid var(--border)' }}>
-                {/* Drift threshold */}
-                <div>
-                  <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 12, marginBottom: 4 }}>
-                    <span style={{ color: 'var(--text-secondary)' }}>Drift threshold</span>
-                    <span className="mono" style={{ color: '#00c853', fontWeight: 600 }}>{driftThreshold}%</span>
-                  </div>
-                  <input type="range" min={2} max={15} step={1} value={driftThreshold} onChange={e => onDriftThresholdChange(Number(e.target.value))} style={{ width: '100%', accentColor: '#00c853' }} />
-                </div>
-                {/* Max position weight */}
-                <div>
-                  <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 12, marginBottom: 4 }}>
-                    <span style={{ color: 'var(--text-secondary)' }}>Max position weight</span>
-                    <span className="mono" style={{ color: '#00c853', fontWeight: 600 }}>{maxPositionWeight}%</span>
-                  </div>
-                  <input type="range" min={10} max={50} step={5} value={maxPositionWeight} onChange={e => onMaxPositionWeightChange(Number(e.target.value))} style={{ width: '100%', accentColor: '#00c853' }} />
-                </div>
-                {/* Slippage tolerance */}
-                <div>
-                  <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 12, marginBottom: 4 }}>
-                    <span style={{ color: 'var(--text-secondary)' }}>Slippage tolerance</span>
-                    <span className="mono" style={{ color: '#00c853', fontWeight: 600 }}>{slippageTolerance}%</span>
-                  </div>
-                  <input type="range" min={0.1} max={2} step={0.1} value={slippageTolerance} onChange={e => onSlippageToleranceChange(Number(e.target.value))} style={{ width: '100%', accentColor: '#00c853' }} />
-                </div>
+                <SliderSetting label="Drift threshold" value={driftThreshold} unit="%" min={2} max={15} step={1} onChange={onDriftThresholdChange} />
+                <SliderSetting label="Max position weight" value={maxPositionWeight} unit="%" min={10} max={50} step={5} onChange={onMaxPositionWeightChange} />
+                <SliderSetting label="Slippage tolerance" value={slippageTolerance} unit="%" min={0.1} max={2} step={0.1} onChange={onSlippageToleranceChange} />
               </div>
             )}
           </div>
@@ -279,13 +264,68 @@ export function ExecuteStep({
         </BottomBar>
       )}
 
-      {isComplete && (
+      {(isComplete || (isPolling && pendingCount === 0)) && (
         <BottomBar>
           <Button onClick={onViewResults} className="w-full" size="lg">
             View Results →
           </Button>
         </BottomBar>
       )}
+    </div>
+  );
+}
+
+function TradeCard({ trade: t, onCancel }: { trade: TradeProgress; onCancel?: (id: number) => void }) {
+  return (
+    <div style={{ borderRadius: 10, padding: '10px 12px', border: '1px solid var(--border)', background: 'var(--bg-card)' }}>
+      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 4 }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+          <Badge variant={actionVariant(t.action)}>{actionLabel(t.action)}</Badge>
+          <span style={{ fontWeight: 600, fontSize: 13, color: 'var(--text-primary)' }}>{t.symbol}</span>
+          {t.orderType === 'limit' && (
+            <span style={{ fontSize: 9, fontWeight: 700, padding: '1px 5px', borderRadius: 4, background: 'rgba(245,158,11,0.15)', color: '#f59e0b' }}>LIMIT</span>
+          )}
+        </div>
+        <Badge variant={statusVariant(t.status)}>{statusLabel(t.status)}</Badge>
+      </div>
+      <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 11, color: 'var(--text-secondary)' }}>
+        <span className="mono">{formatCurrency('actualAmount' in t && t.actualAmount ? t.actualAmount : t.amount)}</span>
+        <span>{t.reason}</span>
+      </div>
+      {t.limitRate && (
+        <div style={{ fontSize: 10, marginTop: 3, color: '#f59e0b' }}>
+          Limit @ {t.limitRate.toFixed(2)} (±0.3% buffer)
+        </div>
+      )}
+      {t.error && (
+        <div style={{ fontSize: 11, marginTop: 4, color: '#ef4444' }}>{t.error}</div>
+      )}
+      {t.status === 'limit-pending' && t.orderId && onCancel && (
+        <button
+          onClick={() => onCancel(t.orderId!)}
+          style={{
+            marginTop: 6, padding: '3px 10px', borderRadius: 6, fontSize: 10, fontWeight: 600,
+            background: 'rgba(239,68,68,0.08)', color: '#ef4444', border: '1px solid #ef444430',
+            cursor: 'pointer',
+          }}
+        >
+          Cancel Order
+        </button>
+      )}
+    </div>
+  );
+}
+
+function SliderSetting({ label, value, unit, min, max, step, onChange }: {
+  label: string; value: number; unit: string; min: number; max: number; step: number; onChange: (v: number) => void;
+}) {
+  return (
+    <div>
+      <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 12, marginBottom: 4 }}>
+        <span style={{ color: 'var(--text-secondary)' }}>{label}</span>
+        <span className="mono" style={{ color: '#00c853', fontWeight: 600 }}>{value}{unit}</span>
+      </div>
+      <input type="range" min={min} max={max} step={step} value={value} onChange={e => onChange(Number(e.target.value))} style={{ width: '100%', accentColor: '#00c853' }} />
     </div>
   );
 }

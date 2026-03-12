@@ -3,6 +3,7 @@ import { NextRequest, NextResponse } from 'next/server';
 import { randomUUID } from 'crypto';
 
 const BASE = 'https://public-api.etoro.com';
+const LIMIT_BUFFER = 0.003; // 0.3% buffer on limit orders
 
 interface TradeRequest {
   action: 'buy' | 'full-close' | 'partial-close';
@@ -73,6 +74,45 @@ async function etoroCall(method: string, path: string, body: any, bearerToken: s
   throw new Error('Unexpected: exhausted retries');
 }
 
+interface MarketInfo {
+  isMarketOpen: boolean;
+  lastPrice: number;
+  symbolFull?: string;
+}
+
+async function getMarketInfo(instrumentIds: number[]): Promise<Map<number, MarketInfo>> {
+  const ETORO_API_KEY = process.env.ETORO_API_KEY || '';
+  const ETORO_USER_KEY = process.env.ETORO_USER_KEY || '';
+  const map = new Map<number, MarketInfo>();
+
+  try {
+    const url = `${BASE}/api/v1/market-data/instruments?instrumentIds=${instrumentIds.join(',')}&fields=instrumentId,isMarketOpen,symbolFull,lastPrice,closingPrices`;
+    const res = await fetch(url, {
+      headers: { 'x-api-key': ETORO_API_KEY, 'x-user-key': ETORO_USER_KEY, 'x-request-id': randomUUID() },
+    });
+    if (res.ok) {
+      const data = await res.json();
+      const instruments = data?.instruments ?? data ?? [];
+      for (const inst of instruments) {
+        const lastPrice = inst.lastPrice ?? inst.closingPrices?.official ?? inst.closingPrices?.lastTrading ?? 0;
+        map.set(inst.instrumentId, {
+          isMarketOpen: inst.isMarketOpen !== false,
+          lastPrice,
+          symbolFull: inst.symbolFull,
+        });
+      }
+    }
+  } catch (e) {
+    console.warn('[execute] Market info fetch failed:', (e as Error).message);
+  }
+  return map;
+}
+
+function computeLimitRate(lastPrice: number, isSell: boolean): number {
+  if (isSell) return Math.round(lastPrice * (1 - LIMIT_BUFFER) * 100) / 100;
+  return Math.round(lastPrice * (1 + LIMIT_BUFFER) * 100) / 100;
+}
+
 export async function POST(req: NextRequest) {
   try {
     const { ensureFreshSession, buildSessionCookie } = await import('@/lib/auth');
@@ -90,55 +130,27 @@ export async function POST(req: NextRequest) {
     }
 
     const mode: Mode = accountType;
+    const instrumentIds = [...new Set(trades.map(t => t.instrumentId))];
+    const marketInfo = await getMarketInfo(instrumentIds);
+
     const results = [];
 
-    // Pre-flight: check market status for all instruments
-    const instrumentIds = [...new Set(trades.map(t => t.instrumentId))];
-    let closedInstruments = new Set<number>();
-    try {
-      const ETORO_API_KEY = process.env.ETORO_API_KEY || '';
-      const ETORO_USER_KEY = process.env.ETORO_USER_KEY || '';
-      const statusUrl = `${BASE}/api/v1/market-data/instruments?instrumentIds=${instrumentIds.join(',')}&fields=instrumentId,isMarketOpen,symbolFull`;
-      const statusRes = await fetch(statusUrl, {
-        headers: { 'x-api-key': ETORO_API_KEY, 'x-user-key': ETORO_USER_KEY, 'x-request-id': randomUUID() },
-      });
-      if (statusRes.ok) {
-        const statusData = await statusRes.json();
-        const instruments = statusData?.instruments ?? statusData ?? [];
-        for (const inst of instruments) {
-          if (inst.isMarketOpen === false) {
-            closedInstruments.add(inst.instrumentId);
-            console.warn(`[execute] Market CLOSED for ${inst.symbolFull ?? inst.instrumentId}`);
-          }
-        }
-      }
-    } catch (e) {
-      console.warn('[execute] Market status check failed, proceeding anyway:', (e as Error).message);
-    }
-
     for (const trade of trades) {
-      // Skip if market is closed
-      if (closedInstruments.has(trade.instrumentId)) {
-        console.log(`[execute] SKIPPED ${trade.symbol} (${trade.instrumentId}) — market closed`);
-        results.push({
-          instrumentId: trade.instrumentId,
-          symbol: trade.symbol,
-          action: trade.action,
-          status: 'error',
-          error: `Market closed for ${trade.symbol ?? trade.instrumentId}`,
-        });
-        continue;
-      }
+      const info = marketInfo.get(trade.instrumentId);
+      const isOpen = info?.isMarketOpen ?? true;
+      const lastPrice = info?.lastPrice ?? 0;
+      const sym = trade.symbol ?? info?.symbolFull ?? `${trade.instrumentId}`;
 
       try {
         let orderResult: any;
+        let orderType: 'market' | 'limit' = 'market';
+        let limitRate: number | undefined;
 
         if (trade.action === 'buy') {
-          const path = executionPath(mode, 'market-open-orders/by-amount');
-          console.log(`[execute] BUY ${trade.symbol} (${trade.instrumentId}) $${trade.amount} → ${path}`);
-          orderResult = await etoroCall(
-            'POST', path,
-            {
+          if (isOpen) {
+            const path = executionPath(mode, 'market-open-orders/by-amount');
+            console.log(`[execute] BUY (market) ${sym} $${trade.amount} → ${path}`);
+            orderResult = await etoroCall('POST', path, {
               InstrumentID: trade.instrumentId,
               IsBuy: true,
               Leverage: 1,
@@ -148,66 +160,121 @@ export async function POST(req: NextRequest) {
               IsTslEnabled: null,
               IsNoStopLoss: true,
               IsNoTakeProfit: true,
-            },
-            session.accessToken
-          );
+            }, session.accessToken);
+          } else {
+            orderType = 'limit';
+            limitRate = computeLimitRate(lastPrice, false);
+            const path = executionPath(mode, 'limit-orders');
+            console.log(`[execute] BUY (limit @${limitRate}) ${sym} $${trade.amount} → ${path}`);
+            orderResult = await etoroCall('POST', path, {
+              InstrumentID: trade.instrumentId,
+              IsBuy: true,
+              Leverage: 1,
+              Amount: trade.amount,
+              Rate: limitRate,
+              StopLossRate: null,
+              TakeProfitRate: null,
+              IsTslEnabled: null,
+              IsNoStopLoss: true,
+              IsNoTakeProfit: true,
+            }, session.accessToken);
+          }
+
+          const oid = orderResult?.orderId ?? orderResult?.OrderID ?? orderResult?.OrderId;
           results.push({
             instrumentId: trade.instrumentId,
-            symbol: trade.symbol,
+            symbol: sym,
             action: trade.action,
-            status: 'ok',
-            orderId: orderResult?.orderId || orderResult?.OrderID,
+            status: orderType === 'limit' ? 'limit-pending' : 'ok',
+            orderType,
+            orderId: oid,
+            limitRate,
+            marketOpen: isOpen,
           });
 
         } else if (trade.action === 'full-close' || trade.action === 'partial-close') {
           if (!trade.positionId) {
-            console.error(`[execute] Missing positionId for ${trade.action} on ${trade.symbol} (${trade.instrumentId})`);
+            console.error(`[execute] Missing positionId for ${trade.action} on ${sym}`);
             results.push({
-              instrumentId: trade.instrumentId,
-              symbol: trade.symbol,
-              action: trade.action,
-              status: 'error',
-              error: `Missing positionId — cannot ${trade.action} without it`,
+              instrumentId: trade.instrumentId, symbol: sym, action: trade.action,
+              status: 'error', error: `Missing positionId — cannot ${trade.action}`,
             });
             continue;
           }
 
-          const path = executionPath(mode, `market-close-orders/positions/${trade.positionId}`);
-          console.log(`[execute] ${trade.action.toUpperCase()} ${trade.symbol} (${trade.instrumentId}) pos=${trade.positionId} → ${path}`);
-          orderResult = await etoroCall(
-            'POST', path,
-            {
+          if (isOpen) {
+            const path = executionPath(mode, `market-close-orders/positions/${trade.positionId}`);
+            console.log(`[execute] ${trade.action.toUpperCase()} (market) ${sym} pos=${trade.positionId} → ${path}`);
+            orderResult = await etoroCall('POST', path, {
               InstrumentId: trade.instrumentId,
               UnitsToDeduct: trade.unitsToDeduct ?? null,
-            },
-            session.accessToken
-          );
-          results.push({
-            instrumentId: trade.instrumentId,
-            symbol: trade.symbol,
-            action: trade.action,
-            status: 'ok',
-            orderId: orderResult?.orderId || orderResult?.OrderID,
-          });
+            }, session.accessToken);
+
+            results.push({
+              instrumentId: trade.instrumentId, symbol: sym, action: trade.action,
+              status: 'ok', orderType: 'market' as const,
+              orderId: orderResult?.orderId ?? orderResult?.OrderID ?? orderResult?.OrderId,
+              marketOpen: true,
+            });
+          } else {
+            // For closes on closed markets, place a limit sell order
+            // eToro doesn't support limit close on existing positions directly —
+            // use a limit order to sell the same instrument
+            orderType = 'limit';
+            limitRate = computeLimitRate(lastPrice, true);
+            const path = executionPath(mode, 'limit-orders');
+            const units = trade.unitsToDeduct ?? undefined;
+            const amount = trade.amount ?? undefined;
+            console.log(`[execute] ${trade.action.toUpperCase()} (limit @${limitRate}) ${sym} → ${path}`);
+            orderResult = await etoroCall('POST', path, {
+              InstrumentID: trade.instrumentId,
+              IsBuy: false,
+              Leverage: 1,
+              Amount: amount ?? null,
+              AmountInUnits: units ?? null,
+              Rate: limitRate,
+              StopLossRate: null,
+              TakeProfitRate: null,
+              IsTslEnabled: null,
+              IsNoStopLoss: true,
+              IsNoTakeProfit: true,
+            }, session.accessToken);
+
+            const oid = orderResult?.orderId ?? orderResult?.OrderID ?? orderResult?.OrderId;
+            results.push({
+              instrumentId: trade.instrumentId, symbol: sym, action: trade.action,
+              status: 'limit-pending', orderType: 'limit' as const,
+              orderId: oid, limitRate, marketOpen: false,
+              positionId: trade.positionId,
+            });
+          }
         }
 
       } catch (err: any) {
-        console.error(`[execute] Trade failed for ${trade.symbol} (${trade.instrumentId}):`, err.message);
+        console.error(`[execute] Trade failed for ${sym}:`, err.message);
+
+        if (err.message?.startsWith('AUTH_EXPIRED')) {
+          results.push({ instrumentId: trade.instrumentId, symbol: sym, action: trade.action, status: 'error', error: err.message });
+          break;
+        }
+
         results.push({
-          instrumentId: trade.instrumentId,
-          symbol: trade.symbol,
-          action: trade.action,
-          status: 'error',
-          error: err.message,
+          instrumentId: trade.instrumentId, symbol: sym, action: trade.action,
+          status: 'error', error: err.message,
+          marketOpen: info?.isMarketOpen,
         });
       }
     }
 
     const okCount = results.filter(r => r.status === 'ok').length;
+    const limitCount = results.filter(r => r.status === 'limit-pending').length;
     const errCount = results.filter(r => r.status === 'error').length;
-    console.log(`[execute] Done: ${okCount} ok, ${errCount} failed (mode: ${mode})`);
+    console.log(`[execute] Done: ${okCount} market ok, ${limitCount} limit pending, ${errCount} failed (mode: ${mode})`);
 
-    const response = NextResponse.json({ results, summary: { ok: okCount, errors: errCount, mode } });
+    const response = NextResponse.json({
+      results,
+      summary: { ok: okCount, limitPending: limitCount, errors: errCount, mode },
+    });
     if (newCookie) {
       response.headers.append('Set-Cookie', buildSessionCookie(newCookie));
     }

@@ -14,8 +14,9 @@ export type AutonomyLevel = 'full-auto' | 'approve' | 'inform';
 
 // ── Trade & Execution Types ────────────────────────────
 export type TradeAction = 'full-close' | 'partial-close' | 'buy';
-export type TradeStatus = 'pending' | 'executing' | 'success' | 'failed' | 'skipped';
-export type ExecutionPhase = 'idle' | 'closing' | 'partial-closing' | 'opening' | 'complete' | 'failed';
+export type TradeStatus = 'pending' | 'executing' | 'success' | 'failed' | 'skipped' | 'limit-pending' | 'limit-filled' | 'limit-cancelled';
+export type OrderType = 'market' | 'limit';
+export type ExecutionPhase = 'idle' | 'closing' | 'partial-closing' | 'opening' | 'polling' | 'complete' | 'failed';
 export type AutoRebalanceMode = 'trigger' | 'scheduled' | 'manual';
 
 // ── Portfolio Analysis ─────────────────────────────────
@@ -123,10 +124,14 @@ export interface RebalancePlan {
 // ── Execution ──────────────────────────────────────────
 export interface TradeProgress extends PlannedTrade {
   status: TradeStatus;
+  orderType?: OrderType;
   orderId?: number;
+  limitRate?: number;
+  limitBuffer?: number;
   error?: string;
   executedAt?: string;
   actualAmount?: number;
+  marketOpen?: boolean;
 }
 
 export interface ExecutionSummary {

@@ -16,9 +16,10 @@ export const STEPS: StepInfo[] = [
 ];
 
 export const EXECUTION_PHASES = [
-  { id: 'closing', title: 'Closing Positions', description: 'Closing positions not in target portfolio' },
-  { id: 'partial-closing', title: 'Reducing Positions', description: 'Partially closing overweight positions' },
-  { id: 'opening', title: 'Opening Positions', description: 'Buying underweight and new instruments' },
+  { id: 'closing', title: 'Closing', description: 'Closing positions not in target portfolio' },
+  { id: 'partial-closing', title: 'Reducing', description: 'Partially closing overweight positions' },
+  { id: 'opening', title: 'Buying', description: 'Buying underweight and new instruments' },
+  { id: 'polling', title: 'Pending', description: 'Waiting for limit orders to fill' },
 ];
 
 export const PIE_COLORS = [

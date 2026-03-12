@@ -180,27 +180,96 @@ export function RebalancerApp() {
     setStep(RebalanceStep.Execute);
   };
 
+  const POLL_INTERVAL = 30_000; // 30s between polls
+  const MAX_POLL_CYCLES = 60; // ~30 min max polling
+  const INTER_TRADE_DELAY = 500;
+
+  const getAccountType = (): 'real' | 'demo' => {
+    const stored = typeof window !== 'undefined' ? localStorage.getItem('etoro_account_type') : null;
+    return (stored as 'real' | 'demo') ?? 'demo';
+  };
+
+  const executeTrade = async (trade: any, accountType: string) => {
+    const res = await fetch('/api/execute', {
+      method: 'POST',
+      credentials: 'include',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ trades: [trade], accountType }),
+    });
+    const data = await res.json();
+    if (res.status === 401) throw new Error('AUTH_EXPIRED');
+    if (!res.ok) throw new Error(data?.error ?? `HTTP ${res.status}`);
+    return data.results?.[0];
+  };
+
+  const pollLimitOrders = async (
+    progressList: TradeProgress[],
+    accountType: string,
+  ): Promise<TradeProgress[]> => {
+    const pendingIds = progressList
+      .filter(t => t.status === 'limit-pending' && t.orderId)
+      .map(t => t.orderId!);
+
+    if (!pendingIds.length) return progressList;
+
+    store.setExecutionPhase('polling');
+
+    for (let cycle = 0; cycle < MAX_POLL_CYCLES; cycle++) {
+      const stillPending = progressList.filter(t => t.status === 'limit-pending' && t.orderId);
+      if (!stillPending.length) break;
+
+      const ids = stillPending.map(t => t.orderId!).join(',');
+      try {
+        const res = await fetch(`/api/order-status?orderIds=${ids}&accountType=${accountType}`, { credentials: 'include' });
+        if (res.ok) {
+          const data = await res.json();
+          for (const s of data.statuses ?? []) {
+            const idx = progressList.findIndex(t => t.orderId === s.orderId);
+            if (idx < 0) continue;
+            if (s.isFilled) {
+              progressList[idx] = {
+                ...progressList[idx]!,
+                status: 'limit-filled',
+                actualAmount: s.executedAmount ?? progressList[idx]!.amount,
+                executedAt: new Date().toISOString(),
+              };
+            } else if (s.isCancelled) {
+              progressList[idx] = { ...progressList[idx]!, status: 'limit-cancelled', error: 'Order cancelled' };
+            }
+          }
+          store.setExecutionProgress([...progressList]);
+        }
+      } catch { /* continue polling */ }
+
+      const remaining = progressList.filter(t => t.status === 'limit-pending');
+      if (!remaining.length) break;
+      await new Promise(r => setTimeout(r, POLL_INTERVAL));
+    }
+
+    return progressList;
+  };
+
   const handleExecute = async () => {
     const plan = executionPlan ?? createMockPlanFromAllocations(targetAllocations, portfolio);
     if (!executionPlan) setExecutionPlan(plan);
 
-    // Ordered: full closes → partial closes → buys (frees cash first)
-    const allTrades = [
+    const closeTrades = [
       ...plan.fullCloses.map((t) => ({
         action: t.action, instrumentId: t.instrumentId, symbol: t.symbol, amount: t.amount,
         positionId: t.positionId ?? portfolio?.holdings.find((h) => h.instrumentId === t.instrumentId)?.positions?.[0]?.positionID,
-        units: t.units, reason: t.reason,
+        units: t.units, unitsToDeduct: t.action === 'partial-close' ? t.units : undefined, reason: t.reason,
       })),
       ...plan.partialCloses.map((t) => ({
         action: t.action, instrumentId: t.instrumentId, symbol: t.symbol, amount: t.amount,
         positionId: t.positionId ?? portfolio?.holdings.find((h) => h.instrumentId === t.instrumentId)?.positions?.[0]?.positionID,
         units: t.units, unitsToDeduct: t.units, reason: t.reason,
       })),
-      ...plan.opens.map((t) => ({
-        action: t.action, instrumentId: t.instrumentId, symbol: t.symbol, amount: t.amount,
-        reason: t.reason,
-      })),
     ];
+    const buyTrades = plan.opens.map((t) => ({
+      action: t.action, instrumentId: t.instrumentId, symbol: t.symbol, amount: t.amount, reason: t.reason,
+    }));
+
+    const allTrades = [...closeTrades, ...buyTrades];
 
     if (isDemo) {
       const progressList: TradeProgress[] = allTrades.map((t) => ({
@@ -218,7 +287,10 @@ export function RebalancerApp() {
       return;
     }
 
-    const progressList: TradeProgress[] = allTrades.map((t) => ({
+    const accountType = getAccountType();
+
+    // Initialize progress list
+    let progressList: TradeProgress[] = allTrades.map((t) => ({
       symbol: t.symbol ?? `ID:${t.instrumentId}`,
       instrumentId: t.instrumentId,
       action: t.action as 'full-close' | 'partial-close' | 'buy',
@@ -228,94 +300,176 @@ export function RebalancerApp() {
     }));
     store.setExecutionProgress(progressList);
 
-    const storedAccountType = (typeof window !== 'undefined' ? localStorage.getItem('etoro_account_type') : null) as 'real' | 'demo' | null;
-    const accountType = storedAccountType ?? 'demo';
+    let cashFreed = 0;
+    let authExpired = false;
 
-    let hasAnyFailure = false;
-    const closeCount = plan.fullCloses.length + plan.partialCloses.length;
-
-    for (let i = 0; i < allTrades.length; i++) {
-      const trade = allTrades[i]!;
-
-      // Update execution phase based on trade type
-      if (trade.action === 'full-close') store.setExecutionPhase('closing');
-      else if (trade.action === 'partial-close') store.setExecutionPhase('partial-closing');
-      else if (trade.action === 'buy') {
-        // If closes failed, skip buys (no cash freed)
-        if (hasAnyFailure && i >= closeCount) {
-          progressList[i] = { ...progressList[i]!, status: 'skipped', error: 'Skipped — previous close trades failed' };
-          store.setExecutionProgress([...progressList]);
-          continue;
-        }
-        store.setExecutionPhase('opening');
+    // ═══════════════════════════════════════════════
+    // PHASE 1: Execute ALL closes (market + limit)
+    // ═══════════════════════════════════════════════
+    for (let i = 0; i < closeTrades.length; i++) {
+      if (authExpired) {
+        progressList[i] = { ...progressList[i]!, status: 'skipped', error: 'Session expired' };
+        store.setExecutionProgress([...progressList]);
+        continue;
       }
 
+      const trade = closeTrades[i]!;
+      store.setExecutionPhase(trade.action === 'full-close' ? 'closing' : 'partial-closing');
       progressList[i] = { ...progressList[i]!, status: 'executing' };
       store.setExecutionProgress([...progressList]);
 
       try {
-        const res = await fetch('/api/execute', {
-          method: 'POST',
-          credentials: 'include',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ trades: [trade], accountType }),
-        });
-        const data = await res.json();
+        const result = await executeTrade(trade, accountType);
 
-        if (res.status === 401) {
-          progressList[i] = { ...progressList[i]!, status: 'failed', error: 'Session expired — please re-login' };
-          store.setExecutionProgress([...progressList]);
-          for (let j = i + 1; j < allTrades.length; j++) {
-            progressList[j] = { ...progressList[j]!, status: 'skipped', error: 'Skipped — session expired' };
-          }
-          store.setExecutionProgress([...progressList]);
-          break;
-        }
-
-        if (!res.ok) {
-          throw new Error(data?.error ?? `HTTP ${res.status}`);
-        }
-        const result = data.results?.[0];
         if (result?.status === 'ok') {
           progressList[i] = {
-            ...progressList[i]!,
-            status: 'success',
-            orderId: result?.orderId,
-            executedAt: new Date().toISOString(),
+            ...progressList[i]!, status: 'success', orderType: 'market',
+            orderId: result.orderId, executedAt: new Date().toISOString(),
+          };
+          cashFreed += progressList[i]!.amount;
+        } else if (result?.status === 'limit-pending') {
+          progressList[i] = {
+            ...progressList[i]!, status: 'limit-pending', orderType: 'limit',
+            orderId: result.orderId, limitRate: result.limitRate, marketOpen: false,
           };
         } else {
-          hasAnyFailure = true;
-          const errorMsg = result?.error ?? 'Unknown error from eToro';
           progressList[i] = {
-            ...progressList[i]!,
-            status: errorMsg.includes('Market closed') ? 'skipped' : 'failed',
-            error: errorMsg,
+            ...progressList[i]!, status: 'failed',
+            error: result?.error ?? 'Unknown error',
           };
         }
-      } catch (e: unknown) {
-        hasAnyFailure = true;
-        progressList[i] = { ...progressList[i]!, status: 'failed', error: e instanceof Error ? e.message : 'Execution failed' };
+      } catch (e: any) {
+        if (e.message === 'AUTH_EXPIRED') {
+          authExpired = true;
+          progressList[i] = { ...progressList[i]!, status: 'failed', error: 'Session expired — re-login' };
+        } else {
+          progressList[i] = { ...progressList[i]!, status: 'failed', error: e.message };
+        }
       }
       store.setExecutionProgress([...progressList]);
-
-      // Inter-trade delay to avoid rate limiting
-      if (i < allTrades.length - 1) await new Promise(r => setTimeout(r, 500));
+      if (i < closeTrades.length - 1) await new Promise(r => setTimeout(r, INTER_TRADE_DELAY));
     }
 
-    const successes = progressList.filter(t => t.status === 'success').length;
+    // Poll pending limit close orders
+    const hasLimitCloses = progressList.slice(0, closeTrades.length).some(t => t.status === 'limit-pending');
+    if (hasLimitCloses && !authExpired) {
+      progressList = await pollLimitOrders(progressList, accountType);
+      for (let i = 0; i < closeTrades.length; i++) {
+        if (progressList[i]!.status === 'limit-filled') {
+          cashFreed += progressList[i]!.actualAmount ?? progressList[i]!.amount;
+        }
+      }
+    }
+
+    // ═══════════════════════════════════════════════
+    // PHASE 2: Execute buys with available cash
+    // ═══════════════════════════════════════════════
+    const availableCash = (portfolio?.availableCash ?? 0) + cashFreed;
+
+    for (let i = 0; i < buyTrades.length; i++) {
+      const idx = closeTrades.length + i;
+
+      if (authExpired) {
+        progressList[idx] = { ...progressList[idx]!, status: 'skipped', error: 'Session expired' };
+        store.setExecutionProgress([...progressList]);
+        continue;
+      }
+
+      const trade = buyTrades[i]!;
+      const tradeAmount = trade.amount ?? 0;
+
+      // Check if we have enough cash for this buy
+      if (tradeAmount > availableCash * 1.05) {
+        progressList[idx] = { ...progressList[idx]!, status: 'skipped', error: `Insufficient cash ($${availableCash.toFixed(0)} available)` };
+        store.setExecutionProgress([...progressList]);
+        continue;
+      }
+
+      store.setExecutionPhase('opening');
+      progressList[idx] = { ...progressList[idx]!, status: 'executing' };
+      store.setExecutionProgress([...progressList]);
+
+      try {
+        const result = await executeTrade(trade, accountType);
+
+        if (result?.status === 'ok') {
+          progressList[idx] = {
+            ...progressList[idx]!, status: 'success', orderType: 'market',
+            orderId: result.orderId, executedAt: new Date().toISOString(),
+          };
+        } else if (result?.status === 'limit-pending') {
+          progressList[idx] = {
+            ...progressList[idx]!, status: 'limit-pending', orderType: 'limit',
+            orderId: result.orderId, limitRate: result.limitRate, marketOpen: false,
+          };
+        } else {
+          progressList[idx] = {
+            ...progressList[idx]!, status: 'failed', error: result?.error ?? 'Unknown error',
+          };
+        }
+      } catch (e: any) {
+        if (e.message === 'AUTH_EXPIRED') {
+          authExpired = true;
+          progressList[idx] = { ...progressList[idx]!, status: 'failed', error: 'Session expired — re-login' };
+          for (let j = idx + 1; j < progressList.length; j++) {
+            progressList[j] = { ...progressList[j]!, status: 'skipped', error: 'Session expired' };
+          }
+        } else {
+          progressList[idx] = { ...progressList[idx]!, status: 'failed', error: e.message };
+        }
+      }
+      store.setExecutionProgress([...progressList]);
+      if (i < buyTrades.length - 1) await new Promise(r => setTimeout(r, INTER_TRADE_DELAY));
+    }
+
+    // Poll pending limit buy orders
+    const hasLimitBuys = progressList.slice(closeTrades.length).some(t => t.status === 'limit-pending');
+    if (hasLimitBuys && !authExpired) {
+      progressList = await pollLimitOrders(progressList, accountType);
+    }
+
+    // ═══════════════════════════════════════════════
+    // FINALIZE
+    // ═══════════════════════════════════════════════
+    const successes = progressList.filter(t => t.status === 'success' || t.status === 'limit-filled').length;
     const failures = progressList.filter(t => t.status === 'failed').length;
-    store.setExecutionPhase(failures === progressList.length ? 'failed' : 'complete');
+    const pending = progressList.filter(t => t.status === 'limit-pending').length;
+    const phase = failures === progressList.length ? 'failed'
+      : pending > 0 ? 'polling'
+      : 'complete';
+
+    store.setExecutionPhase(phase as any);
     store.setExecutionSummary({
       totalTrades: progressList.length,
       successful: successes,
       failed: failures,
-      skipped: progressList.filter(t => t.status === 'skipped').length,
+      skipped: progressList.filter(t => t.status === 'skipped' || t.status === 'limit-cancelled').length,
       totalFeesEstimate: 0,
       startedAt: new Date().toISOString(),
       completedAt: new Date().toISOString(),
       trades: progressList,
     });
-    // Stay on Execute step — user clicks "View Results" to proceed
+  };
+
+  const handleCancelOrder = async (orderId: number) => {
+    const accountType = getAccountType();
+    try {
+      const res = await fetch('/api/order-status', {
+        method: 'DELETE',
+        credentials: 'include',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ orderId, accountType }),
+      });
+      const data = await res.json();
+      if (data.cancelled) {
+        const updated = executionProgress.map(t =>
+          t.orderId === orderId ? { ...t, status: 'limit-cancelled' as const, error: 'Cancelled by user' } : t
+        );
+        store.setExecutionProgress(updated);
+      }
+    } catch (e: any) {
+      console.error('Cancel failed:', e.message);
+    }
   };
 
   const handleClearOptimizationResult = () => {
@@ -373,6 +527,7 @@ export function RebalancerApp() {
             portfolio={portfolio}
             onExecute={handleExecute}
             onViewResults={() => setStep(RebalanceStep.Results)}
+            onCancelOrder={handleCancelOrder}
             driftThreshold={driftThreshold}
             maxPositionWeight={maxPositionWeight}
             slippageTolerance={slippageTolerance}
