@@ -198,13 +198,33 @@ export async function GET(req: NextRequest) {
     }
 
     let mirrorClosedPnL = 0;
+    const mirrorSummaries: Array<{mirrorID: number; parentUsername?: string; investedAmount: number; positions: number; openDate?: string; keys: string[]}> = [];
     for (const mirror of cp.mirrors ?? []) {
       mirrorClosedPnL += mirror.closedPositionsNetProfit ?? 0;
+      mirrorSummaries.push({
+        mirrorID: mirror.mirrorID ?? mirror.MirrorID ?? 0,
+        parentUsername: mirror.parentUsername ?? mirror.ParentUsername ?? mirror.copyFromUserName ?? undefined,
+        investedAmount: mirror.investedAmount ?? mirror.amount ?? 0,
+        positions: (mirror.positions ?? []).length,
+        openDate: mirror.openDate ?? mirror.OpenDate ?? mirror.openDateTime ?? undefined,
+        keys: Object.keys(mirror).slice(0, 30),
+      });
       for (const p of mirror.positions ?? []) {
         upsertInstrument(copyMap, p, pnlByPosition);
       }
     }
     console.log(`[portfolio] Mirror closed P&L: $${Math.round(mirrorClosedPnL)}`);
+    if (mirrorSummaries.length > 0) {
+      console.log(`[portfolio] Mirror[0] keys: ${mirrorSummaries[0]!.keys.join(', ')}`);
+      console.log(`[portfolio] Mirror[0]: mirrorID=${mirrorSummaries[0]!.mirrorID} user=${mirrorSummaries[0]!.parentUsername} invested=${mirrorSummaries[0]!.investedAmount} positions=${mirrorSummaries[0]!.positions} open=${mirrorSummaries[0]!.openDate}`);
+      console.log(`[portfolio] Total mirrors: ${mirrorSummaries.length}`);
+      // Log first mirror raw for field discovery
+      const firstMirror = (cp.mirrors ?? [])[0];
+      if (firstMirror) {
+        const { positions, ...rest } = firstMirror;
+        console.log(`[portfolio] Mirror[0] raw (no positions):`, JSON.stringify(rest).slice(0, 500));
+      }
+    }
 
     // ── Enrich instrument names/symbols (batched by 100) ──────────────────
     const apiKey  = process.env.ETORO_API_KEY ?? '';
