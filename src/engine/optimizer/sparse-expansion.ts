@@ -33,27 +33,47 @@ export interface ExpansionParams {
 interface SearchInstrument {
   instrumentId?: number;
   instrumentID?: number;
+  symbolFull?: string;
+  internalSymbolFull?: string;
   displayname?: string;
   displayName?: string;
+  instrumentDisplayName?: string;
+  internalInstrumentDisplayName?: string;
   logo50x50?: string;
   dailyPriceChange?: number;
   weeklyPriceChange?: number;
   monthlyPriceChange?: number;
   oneYearPriceChange?: number;
   popularityUniques7Day?: number;
+  popularityUniques?: number;
   instrumentTypeID?: number;
   instrumentTypeId?: number;
+  internalAssetClassId?: number;
   isCurrentlyTradable?: boolean;
   isBuyEnabled?: boolean;
   isOpen?: boolean;
+  isInternalInstrument?: boolean;
+  isHiddenFromClient?: boolean;
 }
 
 function extractSymbol(instrument: SearchInstrument): string {
+  const sym = instrument.symbolFull ?? instrument.internalSymbolFull;
+  if (sym && !sym.startsWith('Drm.')) return sym;
   const logo = instrument.logo50x50;
   if (typeof logo === 'string' && logo.includes('market-avatars/')) {
-    return logo.split('market-avatars/')[1]?.split('/')[0]?.toUpperCase() ?? (instrument.displayname ?? instrument.displayName ?? 'UNKNOWN').toUpperCase();
+    const extracted = logo.split('market-avatars/')[1]?.split('/')[0]?.toUpperCase();
+    if (extracted && extracted.length <= 10) return extracted;
   }
-  return (instrument.displayname ?? instrument.displayName ?? 'UNKNOWN').toUpperCase();
+  const name = instrument.displayname ?? instrument.displayName ?? instrument.instrumentDisplayName ?? instrument.internalInstrumentDisplayName;
+  return (name ?? 'UNKNOWN').toUpperCase();
+}
+
+function extractDisplayName(instrument: SearchInstrument): string {
+  return instrument.displayname
+    ?? instrument.displayName
+    ?? instrument.instrumentDisplayName
+    ?? instrument.internalInstrumentDisplayName
+    ?? extractSymbol(instrument);
 }
 
 function normalizeArray(values: number[]): number[] {
@@ -68,7 +88,7 @@ function normalizeArray(values: number[]): number[] {
 export async function fetchCandidates(params: ExpansionParams): Promise<CandidateInstrument[]> {
   if (!params.apiKey || !params.userKey) return [];
 
-  const url = `${ETORO_BASE}/market-data/search?fields=instrumentId,displayname,currentRate,dailyPriceChange,weeklyPriceChange,monthlyPriceChange,oneYearPriceChange,logo50x50,instrumentTypeID,isOpen,isCurrentlyTradable,isBuyEnabled,popularityUniques7Day&pageSize=100&sort=popularityUniques7Day:desc`;
+  const url = `${ETORO_BASE}/market-data/search?query=*&pageSize=100`;
   const res = await fetch(url, {
     headers: {
       'x-api-key': params.apiKey,
@@ -82,14 +102,17 @@ export async function fetchCandidates(params: ExpansionParams): Promise<Candidat
   }
 
   const data = await res.json();
-  const instruments: SearchInstrument[] = data?.instruments ?? data?.InstrumentSearchResponse?.Instruments ?? [];
+  const instruments: SearchInstrument[] = data?.items ?? data?.instruments ?? [];
 
   const filtered = instruments.filter((instrument) => {
     const instrumentId = instrument.instrumentId ?? instrument.instrumentID;
-    const instrumentTypeId = instrument.instrumentTypeID ?? instrument.instrumentTypeId ?? 0;
-    if (!instrumentId || params.heldInstrumentIds.has(instrumentId)) return false;
-    if (instrument.isCurrentlyTradable !== true) return false;
-    if (instrument.isBuyEnabled !== true) return false;
+    const instrumentTypeId = instrument.instrumentTypeID ?? instrument.instrumentTypeId ?? instrument.internalAssetClassId ?? 0;
+    if (!instrumentId || instrumentId < 0) return false;
+    if (params.heldInstrumentIds.has(instrumentId)) return false;
+    if (instrument.isHiddenFromClient === true) return false;
+    if (instrument.isInternalInstrument === true && instrument.isCurrentlyTradable !== true) return false;
+    if (instrument.isCurrentlyTradable === false) return false;
+    if (instrument.isBuyEnabled === false) return false;
     if (params.assetTypeIds?.length && !params.assetTypeIds.includes(instrumentTypeId)) return false;
     return true;
   });
@@ -97,7 +120,7 @@ export async function fetchCandidates(params: ExpansionParams): Promise<Candidat
   const yearChanges = filtered.map((i) => i.oneYearPriceChange ?? 0);
   const monthChanges = filtered.map((i) => i.monthlyPriceChange ?? 0);
   const weekChanges = filtered.map((i) => i.weeklyPriceChange ?? 0);
-  const popValues = filtered.map((i) => i.popularityUniques7Day ?? 0);
+  const popValues = filtered.map((i) => i.popularityUniques7Day ?? i.popularityUniques ?? 0);
 
   const normYear = normalizeArray(yearChanges);
   const normMonth = normalizeArray(monthChanges);
@@ -109,7 +132,7 @@ export async function fetchCandidates(params: ExpansionParams): Promise<Candidat
   return filtered
     .map((instrument, idx) => {
       const instrumentId = instrument.instrumentId ?? instrument.instrumentID ?? 0;
-      const instrumentTypeId = instrument.instrumentTypeID ?? instrument.instrumentTypeId ?? 0;
+      const instrumentTypeId = instrument.instrumentTypeID ?? instrument.instrumentTypeId ?? instrument.internalAssetClassId ?? 0;
 
       const multiMomentumScore = normYear[idx]! * 0.4 + normMonth[idx]! * 0.35 + normWeek[idx]! * 0.25;
       const popularityNorm = normPop[idx]!;
@@ -140,9 +163,9 @@ export async function fetchCandidates(params: ExpansionParams): Promise<Candidat
       return {
         instrumentId,
         symbol: extractSymbol(instrument),
-        displayName: instrument.displayname ?? instrument.displayName ?? extractSymbol(instrument),
+        displayName: extractDisplayName(instrument),
         instrumentTypeId,
-        popularityScore: instrument.popularityUniques7Day ?? 0,
+        popularityScore: instrument.popularityUniques7Day ?? instrument.popularityUniques ?? 0,
         momentumScore: multiMomentumScore,
         compositeScore,
         multiMomentumScore,

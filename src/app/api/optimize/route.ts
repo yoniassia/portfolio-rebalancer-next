@@ -128,6 +128,7 @@ export async function POST(req: NextRequest) {
           apiKey,
           userKey,
         });
+        console.log(`[optimize] fetchCandidates returned ${stage1.length} candidates (top: ${stage1.slice(0, 3).map(c => c.symbol).join(', ')})`);
 
         const targetCount = Math.min(m + 3, 12);
         candidates = await correlationPreScreen(
@@ -136,7 +137,9 @@ export async function POST(req: NextRequest) {
           session.accessToken,
           targetCount,
         );
-      } catch {
+        console.log(`[optimize] correlationPreScreen returned ${candidates.length} candidates`);
+      } catch (e) {
+        console.error(`[optimize] Candidate fetch failed: ${e instanceof Error ? e.message : e}`);
         candidates = [];
       }
     }

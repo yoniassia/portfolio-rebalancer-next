@@ -40,19 +40,24 @@ async function enrichInstruments(
       if (!res.ok) continue;
       const data = await res.json();
       for (const inst of data?.instrumentDisplayDatas ?? []) {
-        let symbol = `ID:${inst.instrumentID}`;
-        for (const img of inst.images ?? []) {
-          if (img.uri?.includes('market-avatars/')) {
-            symbol = img.uri.split('market-avatars/')[1].split('/')[0].toUpperCase();
-            break;
+        let symbol = inst.symbolFull ?? '';
+        if (!symbol) {
+          for (const img of inst.images ?? []) {
+            if (img.uri?.includes('market-avatars/')) {
+              symbol = img.uri.split('market-avatars/')[1].split('/')[0].toUpperCase();
+              break;
+            }
           }
         }
+        if (!symbol) symbol = `ID:${inst.instrumentID}`;
         result[inst.instrumentID] = {
           symbol,
           displayName: inst.instrumentDisplayName ?? symbol,
         };
       }
-    } catch { /* skip batch on error */ }
+    } catch (e) {
+      console.warn(`[portfolio] Enrichment batch failed: ${e instanceof Error ? e.message : e}`);
+    }
   }
   return result;
 }
