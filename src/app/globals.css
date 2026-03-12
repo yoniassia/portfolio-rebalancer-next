@@ -1,5 +1,28 @@
 @import "tailwindcss";
 
+:root {
+  --bg-primary: #0D0D0D;
+  --bg-card: #161616;
+  --bg-input: #1E1E1E;
+  --border: #2A2A2A;
+  --accent: #6C47FF;
+  --accent-hover: #7C57FF;
+  --text-primary: #FFFFFF;
+  --text-secondary: #9CA3AF;
+  --text-muted: #6B7280;
+  --error: #EF4444;
+  --success: #10B981;
+  --warning: #F59E0B;
+  --info: #3B82F6;
+  --profit: #10B981;
+  --loss: #EF4444;
+  --text-tertiary: #4B5563;
+}
+
+.mono {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+}
+
 html, body {
   margin: 0;
   padding: 0;

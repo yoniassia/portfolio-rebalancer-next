@@ -1,5 +1,5 @@
 'use client';
-import { useState } from 'react';
+import { useState, useCallback } from 'react';
 import { Button } from '../shared/Button';
 import { Badge } from '../shared/Badge';
 import { Spinner } from '../shared/Spinner';
@@ -7,288 +7,413 @@ import { BottomBar } from '../layout/BottomBar';
 import { cn } from '../../utils/cn';
 import { formatWeight } from '../../utils/format';
 import { PIE_COLORS } from '../../constants/steps';
-import type { OptimizationMethod, OptimizationResult } from '../../types/rebalancer';
+import type { OptimizationMethod, OptimizationResult, PortfolioAnalysis, BacktestResult } from '../../types/rebalancer';
 
 interface OptimizeStepProps {
+  portfolio: PortfolioAnalysis;
   onOptimize: (method: OptimizationMethod, params: Record<string, number>) => Promise<OptimizationResult>;
-  onApplyResult: (result: OptimizationResult) => void;
-  onSkip: () => void;
+  onApply: (result: OptimizationResult) => void;
   isOptimizing: boolean;
   progress: { phase: string; current: number; total: number } | null;
   result: OptimizationResult | null;
   holdingCount: number;
+  onClearResult: () => void;
 }
 
 const RISK_LEVELS = [
-  { level: 1, label: 'Very Low', desc: 'Conservative, minimum variance', method: 'min-variance' as OptimizationMethod, vol: '5-10%', params: { maxWeight: 0.15 } },
-  { level: 2, label: 'Low', desc: 'Cautious, risk parity', method: 'risk-parity' as OptimizationMethod, vol: '8-14%', params: { maxWeight: 0.20 } },
-  { level: 3, label: 'Moderate', desc: 'Balanced, risk parity', method: 'risk-parity' as OptimizationMethod, vol: '12-18%', params: { maxWeight: 0.25 } },
-  { level: 4, label: 'High', desc: 'Growth oriented, mean-variance', method: 'mvo' as OptimizationMethod, vol: '16-24%', params: { riskAversion: 1.5, maxWeight: 0.30 } },
-  { level: 5, label: 'Very High', desc: 'Aggressive, mean-variance', method: 'mvo' as OptimizationMethod, vol: '22-35%', params: { riskAversion: 0.5, maxWeight: 0.40 } },
+  { level: 1 as const, label: 'Very Low', desc: 'Minimum variance', method: 'min-variance' as OptimizationMethod, params: { riskAversion: 2.5 } },
+  { level: 2 as const, label: 'Low', desc: 'Risk parity, cautious', method: 'risk-parity' as OptimizationMethod, params: { riskAversion: 2.5 } },
+  { level: 3 as const, label: 'Moderate', desc: 'Balanced risk parity', method: 'risk-parity' as OptimizationMethod, params: { riskAversion: 2.5 } },
+  { level: 4 as const, label: 'High', desc: 'Growth oriented MVO', method: 'mvo' as OptimizationMethod, params: { riskAversion: 1.5 } },
+  { level: 5 as const, label: 'Very High', desc: 'Aggressive MVO', method: 'mvo' as OptimizationMethod, params: { riskAversion: 0.5 } },
 ];
 
-const METHODS = [
-  { id: 'equal-weight' as OptimizationMethod, label: 'Equal Weight', desc: 'Distribute equally across all assets' },
-  { id: 'min-variance' as OptimizationMethod, label: 'Min Variance', desc: 'Minimize portfolio volatility' },
-  { id: 'risk-parity' as OptimizationMethod, label: 'Risk Parity', desc: 'Equal risk contribution per asset' },
-  { id: 'mvo' as OptimizationMethod, label: 'Mean-Variance', desc: 'Maximize risk-adjusted returns' },
-];
+const RISK_COLORS = ['#10b981', '#22c55e', '#f59e0b', '#f97316', '#ef4444'];
 
-export function OptimizeStep({
-  onOptimize,
-  onApplyResult,
-  onSkip,
-  isOptimizing,
-  progress,
-  result,
-  holdingCount,
-}: OptimizeStepProps) {
-  const [tab, setTab] = useState<'simple' | 'advanced'>('simple');
-  const [riskLevel, setRiskLevel] = useState<number>(3);
-  const [selectedMethod, setSelectedMethod] = useState<OptimizationMethod>('risk-parity');
-  const [advMaxWeight, setAdvMaxWeight] = useState(25);
+function formatReasonLabel(reason?: string): { label: string; variant: 'info' | 'success' | 'warning' } {
+  switch (reason) {
+    case 'Diversifier': return { label: '🔀 Diversifier', variant: 'info' };
+    case 'Momentum': return { label: '📈 Momentum', variant: 'success' };
+    case 'Capital Preservation': return { label: '🛡️ Preservation', variant: 'warning' };
+    case 'Risk Reducer': return { label: '⚖️ Risk Reducer', variant: 'info' };
+    default: return { label: reason ?? 'Candidate', variant: 'info' };
+  }
+}
+
+// ── Mini Equity Chart ────────────────────────────────────
+function EquityChart({ data, benchmark }: { data: [number, number][]; benchmark?: [number, number][] }) {
+  if (data.length < 2) return null;
+  const allValues = [...data.map(d => d[1]), ...(benchmark ?? []).map(d => d[1])];
+  const min = Math.min(...allValues) * 0.995;
+  const max = Math.max(...allValues) * 1.005;
+  const r = max - min || 1;
+  const w = 340;
+  const h = 100;
+  const toPath = (points: [number, number][]) => points.map((p, i) => {
+    const x = (i / (points.length - 1)) * w;
+    const y = h - ((p[1] - min) / r) * h;
+    return `${x},${y}`;
+  }).join(' ');
+  const isProfit = data[data.length - 1]![1] >= data[0]![1];
+  return (
+    <svg width="100%" height={h} viewBox={`0 0 ${w} ${h}`} preserveAspectRatio="xMidYMid meet">
+      <defs>
+        <linearGradient id="ec-fill" x1="0" y1="0" x2="0" y2="1">
+          <stop offset="0%" stopColor={isProfit ? '#00C853' : '#EF4444'} stopOpacity="0.2" />
+          <stop offset="100%" stopColor={isProfit ? '#00C853' : '#EF4444'} stopOpacity="0" />
+        </linearGradient>
+      </defs>
+      {benchmark && <polyline points={toPath(benchmark)} fill="none" stroke="var(--text-tertiary)" strokeWidth="1.5" strokeDasharray="4 2" opacity="0.5" />}
+      <polygon points={`0,${h} ${toPath(data)} ${w},${h}`} fill="url(#ec-fill)" />
+      <polyline points={toPath(data)} fill="none" stroke={isProfit ? '#00C853' : '#EF4444'} strokeWidth="2" />
+    </svg>
+  );
+}
+
+export function OptimizeStep({ portfolio, onOptimize, onApply, isOptimizing, progress, result, holdingCount, onClearResult }: OptimizeStepProps) {
+  // Sub-screens: 'config' | 'results'
+  const [screen, setScreen] = useState<'config' | 'results'>(result ? 'results' : 'config');
+  const [riskLevel, setRiskLevel] = useState(3);
+  const [addNew, setAddNew] = useState(true);
+  const [newCount, setNewCount] = useState(3);
+  const [disabledNewInstruments, setDisabledNewInstruments] = useState<Set<number>>(new Set());
 
   const canOptimize = holdingCount >= 2;
+  const effectiveM = addNew ? newCount : 0;
 
-  const handleOptimize = () => {
-    if (tab === 'simple') {
-      const risk = RISK_LEVELS[riskLevel - 1]!;
-      const params: Record<string, number> = {};
-      for (const [k, v] of Object.entries(risk.params)) {
-        if (v !== undefined) params[k] = v;
-      }
-      onOptimize(risk.method, params);
-    } else {
-      const params: Record<string, number> = { maxWeight: advMaxWeight / 100 };
-      onOptimize(selectedMethod, params);
+  // When risk level changes with results showing → go back to config, clear results
+  const handleRiskChange = useCallback((level: number) => {
+    setRiskLevel(level);
+    if (result) {
+      onClearResult();
+      setScreen('config');
+      setDisabledNewInstruments(new Set());
+    }
+  }, [result, onClearResult]);
+
+  const handleAddNewChange = useCallback((val: boolean) => {
+    setAddNew(val);
+    if (result) {
+      onClearResult();
+      setScreen('config');
+      setDisabledNewInstruments(new Set());
+    }
+  }, [result, onClearResult]);
+
+  const handleNewCountChange = useCallback((count: number) => {
+    setNewCount(count);
+    if (result) {
+      onClearResult();
+      setScreen('config');
+      setDisabledNewInstruments(new Set());
+    }
+  }, [result, onClearResult]);
+
+  const handleOptimize = async () => {
+    const risk = RISK_LEVELS[riskLevel - 1]!;
+    try {
+      const optimResult = await onOptimize(risk.method, { ...risk.params, m: effectiveM });
+      if (optimResult) setScreen('results');
+    } catch {
+      // Error handled upstream
     }
   };
 
-  return (
-    <div className="flex flex-col flex-1">
-      <div className="flex-1 px-4 py-4 space-y-4 overflow-y-auto">
-        {!canOptimize && (
-          <div className="rounded-lg p-3 text-sm" style={{ background: 'rgba(245,158,11,0.12)', color: 'var(--warning)' }}>
-            <span className="font-medium">Optimizer requires 5+ instruments.</span>{' '}
-            You have {holdingCount}. You can skip to set targets manually.
+  const toggleNewInstrument = (instrumentId: number) => {
+    const next = new Set(disabledNewInstruments);
+    if (next.has(instrumentId)) next.delete(instrumentId);
+    else next.add(instrumentId);
+    setDisabledNewInstruments(next);
+  };
+
+  // ── CONFIG SCREEN (3a) ────────────────────────────────
+  if (screen === 'config' || !result) {
+    return (
+      <div className="flex flex-col flex-1">
+        <div className="flex-1 px-4 py-4 space-y-4 overflow-y-auto" style={{ paddingBottom: 80 }}>
+
+          {!canOptimize && (
+            <div style={{ borderRadius: 10, padding: 12, background: 'rgba(245,158,11,0.12)', color: '#f59e0b', fontSize: 13, fontWeight: 500 }}>
+              Optimizer requires 2+ instruments. You have {holdingCount}.
+            </div>
+          )}
+
+          {/* Risk Tolerance */}
+          <div>
+            <div style={{ fontSize: 10, color: 'var(--text-tertiary)', fontWeight: 600, letterSpacing: 1, marginBottom: 10 }}>RISK TOLERANCE</div>
+            <div style={{ display: 'flex', gap: 6 }}>
+              {RISK_LEVELS.map((r, i) => (
+                <button
+                  key={r.level}
+                  onClick={() => handleRiskChange(r.level)}
+                  disabled={!canOptimize}
+                  style={{
+                    flex: 1, padding: '10px 4px', borderRadius: 10, border: 'none', cursor: canOptimize ? 'pointer' : 'not-allowed',
+                    background: riskLevel === r.level ? `${RISK_COLORS[i]}22` : 'var(--bg-card)',
+                    outline: riskLevel === r.level ? `2px solid ${RISK_COLORS[i]}` : '1px solid var(--border)',
+                    opacity: canOptimize ? 1 : 0.5, transition: 'all 0.15s',
+                  }}
+                >
+                  <div style={{ fontSize: 18, marginBottom: 2 }}>
+                    {['🛡️', '🔒', '⚖️', '📈', '🚀'][i]}
+                  </div>
+                  <div style={{ fontSize: 10, fontWeight: 700, color: riskLevel === r.level ? RISK_COLORS[i] : 'var(--text-secondary)' }}>
+                    {r.label}
+                  </div>
+                </button>
+              ))}
+            </div>
+            <div style={{ fontSize: 11, color: 'var(--text-tertiary)', marginTop: 6, textAlign: 'center' }}>
+              {RISK_LEVELS[riskLevel - 1]?.desc} · {RISK_LEVELS[riskLevel - 1]?.method.replace('-', ' ')}
+            </div>
           </div>
-        )}
 
-        {/* Tab selector */}
-        <div className="flex rounded-lg overflow-hidden" style={{ background: 'var(--bg-card)', padding: 4, border: '1px solid var(--border)' }}>
-          <button
-            onClick={() => setTab('simple')}
-            className={cn('flex-1 py-2 text-sm font-medium transition-colors rounded-lg')}
-            style={{
-              background: tab === 'simple' ? 'var(--accent)' : 'transparent',
-              color: tab === 'simple' ? '#000' : 'var(--text-secondary)',
-            }}
-          >
-            Simple
-          </button>
-          <button
-            onClick={() => setTab('advanced')}
-            className={cn('flex-1 py-2 text-sm font-medium transition-colors rounded-lg')}
-            style={{
-              background: tab === 'advanced' ? 'var(--accent)' : 'transparent',
-              color: tab === 'advanced' ? '#000' : 'var(--text-secondary)',
-            }}
-          >
-            Advanced
-          </button>
-        </div>
-
-        {/* Simple mode */}
-        {tab === 'simple' && (
-          <div className="space-y-2">
-            <h3 className="text-sm font-medium" style={{ color: 'var(--text-primary)' }}>Select Risk Level</h3>
-            {RISK_LEVELS.map((r) => (
+          {/* Add New Instruments */}
+          <div style={{ background: 'var(--bg-card)', borderRadius: 12, padding: 14, border: '1px solid var(--border)' }}>
+            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: addNew ? 10 : 0 }}>
+              <div>
+                <div style={{ fontSize: 13, fontWeight: 600, color: 'var(--text-primary)' }}>Add new instruments</div>
+                <div style={{ fontSize: 11, color: 'var(--text-tertiary)' }}>AI-suggested diversifiers</div>
+              </div>
               <button
-                key={r.level}
-                onClick={() => setRiskLevel(r.level)}
+                onClick={() => handleAddNewChange(!addNew)}
                 disabled={!canOptimize}
-                className={cn('w-full text-left rounded-lg p-3 transition-colors')}
                 style={{
-                  border: riskLevel === r.level ? '1px solid var(--accent)' : '1px solid var(--border)',
-                  background: riskLevel === r.level ? 'rgba(0,200,83,0.12)' : 'var(--bg-card)',
-                  opacity: !canOptimize ? 0.5 : 1,
-                  cursor: !canOptimize ? 'not-allowed' : 'pointer',
+                  width: 44, height: 24, borderRadius: 12, border: 'none', cursor: 'pointer',
+                  background: addNew ? '#00c853' : 'var(--bg-input)', transition: 'background 0.2s', position: 'relative',
                 }}
               >
-                <div className="flex items-center justify-between">
-                  <div>
-                    <div className="flex items-center gap-2">
-                      <span className="font-medium text-sm" style={{ color: 'var(--text-primary)' }}>{r.label}</span>
-                      <Badge variant={r.level <= 2 ? 'success' : r.level === 3 ? 'info' : 'warning'}>
-                        Level {r.level}
-                      </Badge>
-                    </div>
-                    <p className="text-xs mt-0.5" style={{ color: 'var(--text-secondary)' }}>{r.desc}</p>
-                  </div>
-                  <span className="mono text-xs whitespace-nowrap" style={{ color: 'var(--text-secondary)' }}>Vol: {r.vol}</span>
-                </div>
+                <div style={{
+                  width: 20, height: 20, borderRadius: 10, background: '#fff', position: 'absolute', top: 2,
+                  left: addNew ? 22 : 2, transition: 'left 0.2s',
+                }} />
               </button>
-            ))}
-          </div>
-        )}
-
-        {/* Advanced mode */}
-        {tab === 'advanced' && (
-          <div className="space-y-4">
-            <div className="space-y-2">
-              <h3 className="text-sm font-medium" style={{ color: 'var(--text-primary)' }}>Methodology</h3>
-              <div className="grid grid-cols-2 gap-2">
-                {METHODS.map((m) => (
+            </div>
+            {addNew && (
+              <div style={{ display: 'flex', gap: 8 }}>
+                {[1, 2, 3, 5, 10].map(v => (
                   <button
-                    key={m.id}
-                    onClick={() => setSelectedMethod(m.id)}
-                    disabled={!canOptimize}
-                    className={cn('text-left rounded-lg p-3 transition-colors')}
+                    key={v}
+                    onClick={() => handleNewCountChange(v)}
                     style={{
-                      border: selectedMethod === m.id ? '1px solid var(--accent)' : '1px solid var(--border)',
-                      background: selectedMethod === m.id ? 'rgba(0,200,83,0.12)' : 'var(--bg-card)',
-                      opacity: !canOptimize ? 0.5 : 1,
-                      cursor: !canOptimize ? 'not-allowed' : 'pointer',
+                      flex: 1, padding: '8px 0', borderRadius: 8, border: 'none', cursor: 'pointer', fontSize: 13, fontWeight: 600,
+                      background: newCount === v ? 'rgba(0,200,83,0.15)' : 'var(--bg-input)',
+                      color: newCount === v ? '#00c853' : 'var(--text-secondary)',
+                      outline: newCount === v ? '1.5px solid #00c853' : 'none',
                     }}
                   >
-                    <div className="font-medium text-sm" style={{ color: 'var(--text-primary)' }}>{m.label}</div>
-                    <p className="text-xs mt-0.5" style={{ color: 'var(--text-secondary)' }}>{m.desc}</p>
+                    {v}
                   </button>
                 ))}
               </div>
-            </div>
+            )}
+          </div>
 
-            {selectedMethod !== 'equal-weight' && (
-              <div>
-                <label className="block text-sm font-medium mb-1" style={{ color: 'var(--text-primary)' }}>
-                  Max Weight per Asset: <span className="mono">{advMaxWeight}%</span>
-                </label>
-                <input
-                  type="range"
-                  min={5}
-                  max={50}
-                  value={advMaxWeight}
-                  onChange={(e) => setAdvMaxWeight(Number(e.target.value))}
-                  disabled={!canOptimize}
-                  className="w-full"
-                  style={{ accentColor: 'var(--accent)' }}
-                />
-                <div className="flex justify-between text-xs mono" style={{ color: 'var(--text-secondary)' }}>
-                  <span>5%</span>
-                  <span>50%</span>
+          {/* Optimize button */}
+          <Button onClick={handleOptimize} loading={isOptimizing} disabled={!canOptimize || isOptimizing} className="w-full" size="lg">
+            {isOptimizing ? 'Optimizing...' : 'Run Optimization'}
+          </Button>
+
+          {isOptimizing && progress && (
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                <Spinner size="sm" />
+                <span style={{ fontSize: 13, color: 'var(--text-primary)' }}>{progress.phase}</span>
+              </div>
+              <div style={{ height: 4, borderRadius: 99, background: 'var(--bg-input)' }}>
+                <div style={{ height: '100%', borderRadius: 99, width: `${progress.total > 0 ? (progress.current / progress.total) * 100 : 0}%`, background: '#00c853', transition: 'width 0.3s' }} />
+              </div>
+            </div>
+          )}
+        </div>
+      </div>
+    );
+  }
+
+  // ── RESULTS SCREEN (3b) ───────────────────────────────
+  const backtest = result.backtest;
+  const currentBacktest = result.currentBacktest;
+
+  return (
+    <div className="flex flex-col flex-1">
+      <div className="flex-1 px-4 py-4 space-y-4 overflow-y-auto" style={{ paddingBottom: 80 }}>
+
+        {/* Before vs After comparison */}
+        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8 }}>
+          {/* Current */}
+          <div style={{ background: 'var(--bg-card)', borderRadius: 12, padding: 12, border: '1px solid var(--border)' }}>
+            <div style={{ fontSize: 10, color: 'var(--text-tertiary)', fontWeight: 600, letterSpacing: 0.5, marginBottom: 8 }}>CURRENT</div>
+            {result.existingReweighted?.slice(0, 5).map((item, i) => (
+              <div key={item.instrumentId} style={{ display: 'flex', justifyContent: 'space-between', fontSize: 11, padding: '2px 0' }}>
+                <span className="mono" style={{ color: 'var(--text-secondary)' }}>{item.symbol}</span>
+                <span className="mono" style={{ color: 'var(--text-tertiary)' }}>{formatWeight(item.currentWeight ?? 0)}</span>
+              </div>
+            ))}
+            {currentBacktest && (
+              <div style={{ marginTop: 8, paddingTop: 8, borderTop: '1px solid var(--border)' }}>
+                <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 10 }}>
+                  <span style={{ color: 'var(--text-tertiary)' }}>Sharpe</span>
+                  <span className="mono" style={{ color: 'var(--text-secondary)' }}>{currentBacktest.sharpe_ratio.toFixed(2)}</span>
+                </div>
+                <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 10 }}>
+                  <span style={{ color: 'var(--text-tertiary)' }}>Vol</span>
+                  <span className="mono" style={{ color: 'var(--text-secondary)' }}>{currentBacktest.volatility.toFixed(1)}%</span>
                 </div>
               </div>
             )}
           </div>
-        )}
-
-        {/* Optimize button */}
-        {!result && (
-          <Button
-            onClick={handleOptimize}
-            loading={isOptimizing}
-            disabled={!canOptimize || isOptimizing}
-            className="w-full"
-          >
-            {isOptimizing ? 'Optimizing...' : 'Optimize Portfolio'}
-          </Button>
-        )}
-
-        {/* Progress */}
-        {isOptimizing && progress && (
-          <div className="space-y-2">
-            <div className="flex items-center gap-2">
-              <Spinner size="sm" />
-              <span className="text-sm" style={{ color: 'var(--text-primary)' }}>{progress.phase}</span>
+          {/* Proposed */}
+          <div style={{ background: 'var(--bg-card)', borderRadius: 12, padding: 12, border: '1px solid #00c85340' }}>
+            <div style={{ fontSize: 10, color: '#00c853', fontWeight: 600, letterSpacing: 0.5, marginBottom: 8 }}>PROPOSED</div>
+            {result.existingReweighted?.slice(0, 5).map((item, i) => (
+              <div key={item.instrumentId} style={{ display: 'flex', justifyContent: 'space-between', fontSize: 11, padding: '2px 0' }}>
+                <span className="mono" style={{ color: 'var(--text-primary)' }}>{item.symbol}</span>
+                <span className="mono" style={{ color: '#00c853' }}>{formatWeight(item.targetWeight)}</span>
+              </div>
+            ))}
+            <div style={{ marginTop: 8, paddingTop: 8, borderTop: '1px solid var(--border)' }}>
+              <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 10 }}>
+                <span style={{ color: 'var(--text-tertiary)' }}>Exp Return</span>
+                <span className="mono" style={{ color: '#00c853' }}>{(result.metrics.expectedReturn * 100).toFixed(1)}%</span>
+              </div>
+              <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 10 }}>
+                <span style={{ color: 'var(--text-tertiary)' }}>Sharpe</span>
+                <span className="mono" style={{ color: '#00c853' }}>{result.metrics.sharpeRatio.toFixed(2)}</span>
+              </div>
+              <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 10 }}>
+                <span style={{ color: 'var(--text-tertiary)' }}>Vol</span>
+                <span className="mono" style={{ color: 'var(--text-secondary)' }}>{(result.metrics.expectedVolatility * 100).toFixed(1)}%</span>
+              </div>
             </div>
-            <div className="h-2 rounded-full" style={{ background: 'var(--bg-input)' }}>
-              <div
-                className="h-full rounded-full transition-all"
-                style={{ 
-                  width: `${progress.total > 0 ? (progress.current / progress.total) * 100 : 0}%`,
-                  background: 'var(--accent)',
-                }}
-              />
+          </div>
+        </div>
+
+        {/* Backtest Chart */}
+        {backtest && backtest.equity_curve.length > 0 && (
+          <div style={{ background: 'var(--bg-card)', borderRadius: 12, padding: 14, border: '1px solid var(--border)' }}>
+            <div style={{ fontSize: 10, color: 'var(--text-tertiary)', fontWeight: 600, letterSpacing: 0.5, marginBottom: 8 }}>
+              3-YEAR BACKTEST
             </div>
-            <p className="mono text-xs text-right" style={{ color: 'var(--text-secondary)' }}>
-              {progress.current}/{progress.total}
-            </p>
+            <EquityChart data={backtest.equity_curve} benchmark={backtest.benchmark_curve} />
+            <div style={{ display: 'flex', justifyContent: 'center', gap: 16, marginTop: 6, fontSize: 10, color: 'var(--text-tertiary)' }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
+                <div style={{ width: 14, height: 2, background: backtest.total_return_pct >= 0 ? '#00c853' : '#ef4444' }} />
+                <span>Rebalanced</span>
+              </div>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
+                <div style={{ width: 14, height: 1, borderTop: '1px dashed var(--text-tertiary)' }} />
+                <span>Buy & Hold</span>
+              </div>
+            </div>
+            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr 1fr', gap: 8, marginTop: 10 }}>
+              {[
+                { label: 'Return', value: `${backtest.total_return_pct >= 0 ? '+' : ''}${backtest.total_return_pct}%`, color: backtest.total_return_pct >= 0 ? '#00c853' : '#ef4444' },
+                { label: 'B&H', value: `${backtest.benchmark_return_pct >= 0 ? '+' : ''}${backtest.benchmark_return_pct}%`, color: 'var(--text-secondary)' },
+                { label: 'Sharpe', value: backtest.sharpe_ratio.toFixed(2), color: 'var(--text-primary)' },
+                { label: 'Max DD', value: `${backtest.max_drawdown_pct}%`, color: '#ef4444' },
+              ].map((m, i) => (
+                <div key={i} style={{ textAlign: 'center' }}>
+                  <div style={{ fontSize: 9, color: 'var(--text-tertiary)', marginBottom: 2 }}>{m.label}</div>
+                  <div className="mono" style={{ fontSize: 13, fontWeight: 700, color: m.color }}>{m.value}</div>
+                </div>
+              ))}
+            </div>
           </div>
         )}
 
-        {/* Results */}
-        {result && (
-          <div className="space-y-4">
-            <div className="rounded-lg p-3" style={{ border: '1px solid var(--accent)', background: 'var(--bg-card)' }}>
-              <div className="flex items-center gap-2 mb-3">
-                <Badge variant="success">Optimized</Badge>
-                <span className="text-xs capitalize" style={{ color: 'var(--text-secondary)' }}>
-                  {result.method.replace('-', ' ')}
-                </span>
-              </div>
-
-              {/* Weight bars */}
-              <div className="space-y-1.5 mb-3">
-                {result.symbols.map((sym, i) => (
-                  <div key={sym} className="flex items-center gap-2 text-xs">
-                    <div className="mono w-12 text-right font-medium" style={{ color: 'var(--text-primary)' }}>{sym}</div>
-                    <div className="flex-1 h-4 rounded-full overflow-hidden" style={{ background: 'var(--bg-input)' }}>
-                      <div
-                        className="h-full rounded-full"
-                        style={{
-                          width: `${result.weights[i]! * 100}%`,
-                          backgroundColor: PIE_COLORS[i % PIE_COLORS.length],
-                        }}
-                      />
-                    </div>
-                    <div className="mono w-12" style={{ color: 'var(--text-secondary)' }}>{formatWeight(result.weights[i]!)}</div>
+        {/* Changes list */}
+        {result.existingReweighted && result.existingReweighted.length > 0 && (
+          <div>
+            <div style={{ fontSize: 10, color: 'var(--text-tertiary)', fontWeight: 600, letterSpacing: 1, marginBottom: 8 }}>WEIGHT CHANGES</div>
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+              {result.existingReweighted.map((item) => {
+                const delta = (item.targetWeight ?? 0) - (item.currentWeight ?? 0);
+                const isIncrease = delta >= 0;
+                return (
+                  <div key={item.instrumentId} style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '6px 10px', borderRadius: 8, background: 'var(--bg-card)', border: '1px solid var(--border)' }}>
+                    <span className="mono" style={{ fontSize: 13, fontWeight: 600, flex: 1, color: 'var(--text-primary)' }}>{item.symbol}</span>
+                    <span className="mono" style={{ fontSize: 11, color: 'var(--text-tertiary)' }}>{formatWeight(item.currentWeight ?? 0)}</span>
+                    <span style={{ fontSize: 11, color: 'var(--text-tertiary)' }}>→</span>
+                    <span className="mono" style={{ fontSize: 11, color: 'var(--text-primary)' }}>{formatWeight(item.targetWeight)}</span>
+                    <Badge variant={isIncrease ? 'success' : 'warning'}>
+                      {isIncrease ? '+' : ''}{(delta * 100).toFixed(1)}%
+                    </Badge>
                   </div>
-                ))}
-              </div>
-
-              {/* Metrics */}
-              <div className="grid grid-cols-2 gap-2 text-xs">
-                <div className="rounded p-2" style={{ background: 'var(--bg-input)' }}>
-                  <div style={{ color: 'var(--text-secondary)' }}>Expected Return</div>
-                  <div className="mono font-medium" style={{ color: 'var(--text-primary)' }}>{(result.metrics.expectedReturn * 100).toFixed(1)}%</div>
-                </div>
-                <div className="rounded p-2" style={{ background: 'var(--bg-input)' }}>
-                  <div style={{ color: 'var(--text-secondary)' }}>Volatility</div>
-                  <div className="mono font-medium" style={{ color: 'var(--text-primary)' }}>{(result.metrics.expectedVolatility * 100).toFixed(1)}%</div>
-                </div>
-                <div className="rounded p-2" style={{ background: 'var(--bg-input)' }}>
-                  <div style={{ color: 'var(--text-secondary)' }}>Sharpe Ratio</div>
-                  <div className="mono font-medium" style={{ color: 'var(--text-primary)' }}>{result.metrics.sharpeRatio.toFixed(2)}</div>
-                </div>
-                <div className="rounded p-2" style={{ background: 'var(--bg-input)' }}>
-                  <div style={{ color: 'var(--text-secondary)' }}>Diversification</div>
-                  <div className="mono font-medium" style={{ color: 'var(--text-primary)' }}>{result.metrics.diversificationRatio.toFixed(2)}</div>
-                </div>
-              </div>
+                );
+              })}
             </div>
           </div>
         )}
+
+        {/* New Instrument Suggestions */}
+        {result.newRecommendations && result.newRecommendations.length > 0 && (
+          <div>
+            <div style={{ fontSize: 10, color: 'var(--text-tertiary)', fontWeight: 600, letterSpacing: 1, marginBottom: 8 }}>
+              NEW INSTRUMENTS
+            </div>
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+              {result.newRecommendations.map((item) => {
+                const disabled = disabledNewInstruments.has(item.instrumentId);
+                const reasonLabel = formatReasonLabel(item.reason);
+                const yearChange = item.oneYearPriceChange;
+                return (
+                  <div
+                    key={item.instrumentId}
+                    style={{
+                      padding: '10px 12px', borderRadius: 10, background: 'var(--bg-card)',
+                      border: `1px solid ${disabled ? 'var(--border)' : '#00c85340'}`,
+                      opacity: disabled ? 0.5 : 1, transition: 'opacity 0.2s',
+                    }}
+                  >
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                      <button
+                        onClick={() => toggleNewInstrument(item.instrumentId)}
+                        style={{
+                          width: 22, height: 22, borderRadius: 6, border: 'none', cursor: 'pointer', flexShrink: 0,
+                          background: disabled ? 'var(--bg-input)' : '#00c853', color: disabled ? 'var(--text-tertiary)' : '#000',
+                          fontSize: 12, fontWeight: 700, display: 'flex', alignItems: 'center', justifyContent: 'center',
+                        }}
+                      >
+                        {disabled ? '−' : '✓'}
+                      </button>
+                      <div style={{ flex: 1 }}>
+                        <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                          <span className="mono" style={{ fontSize: 13, fontWeight: 700, color: 'var(--text-primary)' }}>{item.symbol}</span>
+                          <Badge variant={reasonLabel.variant}>{reasonLabel.label}</Badge>
+                        </div>
+                        <div style={{ fontSize: 11, color: 'var(--text-tertiary)', marginTop: 2 }}>
+                          {item.displayName}
+                          {typeof yearChange === 'number' && ` · ${yearChange > 0 ? '+' : ''}${yearChange.toFixed(1)}% 1yr`}
+                        </div>
+                      </div>
+                      <span className="mono" style={{ fontSize: 13, fontWeight: 600, color: '#00c853' }}>{formatWeight(item.targetWeight)}</span>
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+        )}
+
+        {/* No new instruments message */}
+        {result.newRecommendations?.length === 0 && addNew && (
+          <div style={{ padding: 12, borderRadius: 10, background: 'var(--bg-card)', border: '1px solid var(--border)', fontSize: 12, color: 'var(--text-tertiary)', textAlign: 'center' }}>
+            No new instruments cleared the minimum weight threshold.
+          </div>
+        )}
+
       </div>
 
       <BottomBar>
-        <div className="space-y-2">
-          {result && (
-            <Button
-              onClick={() => onApplyResult(result)}
-              className="w-full"
-              size="lg"
-            >
-              Apply & Continue
-            </Button>
-          )}
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+          <Button onClick={() => onApply(result)} className="w-full" size="lg">
+            Apply This Plan →
+          </Button>
           <button
-            onClick={onSkip}
-            className="w-full text-center text-sm py-1"
-            style={{ color: 'var(--text-secondary)' }}
-            onMouseEnter={(e) => e.currentTarget.style.color = 'var(--text-primary)'}
-            onMouseLeave={(e) => e.currentTarget.style.color = 'var(--text-secondary)'}
+            onClick={() => { onClearResult(); setScreen('config'); setDisabledNewInstruments(new Set()); }}
+            style={{ width: '100%', textAlign: 'center', fontSize: 13, padding: '6px 0', color: 'var(--text-secondary)', background: 'none', border: 'none', cursor: 'pointer' }}
           >
-            Skip Optimization
+            ← Adjust Configuration
           </button>
         </div>
       </BottomBar>

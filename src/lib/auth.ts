@@ -1,7 +1,7 @@
 /**
  * eToro OAuth/SSO Authentication for Portfolio Rebalancer
- * Stateless encrypted cookie sessions + JWT verification via JWKS
- * Adapted from AgentX
+ * Standalone encrypted cookie sessions + PKCE + JWT verification via JWKS
+ * Uses rebalancer-own app credentials and callback URI (no AgentX dependency).
  */
 import { randomBytes, createHash, createCipheriv, createDecipheriv } from 'crypto';
 
@@ -19,7 +19,7 @@ export const SSO_CONFIG = {
 export const SSO_USER_AGENT = 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36';
 
 const COOKIE_KEY = Buffer.from(
-  process.env.AGENTX_VAULT_KEY || randomBytes(32).toString('hex'),
+  process.env.REBALANCER_VAULT_KEY || randomBytes(32).toString('hex'),
   'hex'
 );
 

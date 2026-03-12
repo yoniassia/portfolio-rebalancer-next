@@ -8,15 +8,11 @@ export interface StepInfo {
 }
 
 export const STEPS: StepInfo[] = [
-  { step: RebalanceStep.Connect, label: 'Connect to eToro', shortLabel: 'Connect', description: 'Enter your API credentials to connect' },
-  { step: RebalanceStep.Configure, label: 'Configure Service', shortLabel: 'Configure', description: 'Set service mode and automation preferences' },
-  { step: RebalanceStep.Portfolio, label: 'Current Portfolio', shortLabel: 'Portfolio', description: 'Review your current holdings and allocation' },
-  { step: RebalanceStep.Optimize, label: 'Optimize Portfolio', shortLabel: 'Optimize', description: 'Choose an optimization strategy' },
-  { step: RebalanceStep.Target, label: 'Target Allocation', shortLabel: 'Target', description: 'Review and adjust target weights' },
-  { step: RebalanceStep.Backtest, label: 'Backtest Strategy', shortLabel: 'Backtest', description: 'Test your allocation with historical data' },
-  { step: RebalanceStep.Validation, label: 'Validate Instruments', shortLabel: 'Validate', description: 'Check availability and tradability' },
-  { step: RebalanceStep.Execution, label: 'Execute Rebalance', shortLabel: 'Execute', description: 'Close, adjust, and open positions' },
-  { step: RebalanceStep.Results, label: 'Results', shortLabel: 'Results', description: 'Review the rebalance outcome' },
+  { step: RebalanceStep.Connect,   label: 'Connect to eToro',     shortLabel: 'Connect',   description: 'Sign in with your eToro account' },
+  { step: RebalanceStep.Portfolio, label: 'Portfolio Health',      shortLabel: 'Portfolio', description: 'Review holdings, health score and insights' },
+  { step: RebalanceStep.Optimize,  label: 'Optimize Portfolio',    shortLabel: 'Optimize',  description: 'Configure risk, optimize and preview backtest' },
+  { step: RebalanceStep.Execute,   label: 'Execute Trades',        shortLabel: 'Execute',   description: 'Review and execute portfolio changes' },
+  { step: RebalanceStep.Results,   label: 'Results',               shortLabel: 'Results',   description: 'Review outcome and set auto-rebalance' },
 ];
 
 export const EXECUTION_PHASES = [

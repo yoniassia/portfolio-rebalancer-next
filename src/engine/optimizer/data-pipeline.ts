@@ -13,6 +13,7 @@ export interface OptimizationData {
   covarianceMatrix: number[][];  // annualized covariance matrix
   volatilities: number[];        // annualized vol per asset
   correlationMatrix: number[][]; // correlation matrix
+  tradingDays: number[];         // annualization basis per asset
   dataPoints: number;            // number of aligned trading days
   missingInstruments: string[];  // instruments with insufficient data
 }
@@ -20,6 +21,7 @@ export interface OptimizationData {
 export type ProgressCallback = (phase: string, current: number, total: number) => void;
 
 const TRADING_DAYS_PER_YEAR = 252;
+const CRYPTO_TYPE_IDS = new Set([11, 12, 100]);
 const MIN_DATA_POINTS = 30;
 const CONCURRENCY_LIMIT = 5;
 
@@ -32,6 +34,7 @@ export async function fetchOptimizationData(
   symbols: string[],
   lookbackDays: number = TRADING_DAYS_PER_YEAR,
   onProgress?: ProgressCallback,
+  instrumentTypeIds?: number[],
 ): Promise<OptimizationData> {
   const n = instrumentIds.length;
   const missingInstruments: string[] = [];
@@ -53,7 +56,6 @@ export async function fetchOptimizationData(
         const candles = resp.candles[0]?.candles ?? [];
         const priceMap = new Map<string, number>();
         for (const c of candles) {
-          // Normalize date to YYYY-MM-DD
           const date = c.fromDate.slice(0, 10);
           priceMap.set(date, c.close);
         }
@@ -78,30 +80,27 @@ export async function fetchOptimizationData(
   onProgress?.('Aligning data...', 0, 1);
 
   const validIds = instrumentIds.filter((id) => closePrices.has(id));
-  const validSymbols = instrumentIds.map((id, i) => ({ id, symbol: symbols[i]! }))
-    .filter(({ id }) => closePrices.has(id))
-    .map(({ symbol }) => symbol);
+  const validSymbols = instrumentIds.map((id, i) => ({ id, symbol: symbols[i]!, typeId: instrumentTypeIds?.[i] }))
+    .filter(({ id }) => closePrices.has(id));
 
   if (validIds.length < 2) {
     throw new Error('Need at least 2 instruments with price data for optimization');
   }
 
-  // Find common dates
   const allDateSets = validIds.map((id) => new Set(closePrices.get(id)!.keys()));
   let commonDates = [...allDateSets[0]!];
   for (let i = 1; i < allDateSets.length; i++) {
     commonDates = commonDates.filter((d) => allDateSets[i]!.has(d));
   }
-  commonDates.sort(); // ascending chronological order
+  commonDates.sort();
 
   if (commonDates.length < MIN_DATA_POINTS) {
     throw new Error(`Insufficient aligned data: only ${commonDates.length} common dates (need ${MIN_DATA_POINTS}+)`);
   }
 
-  // Phase 3: Compute log returns
   onProgress?.('Computing returns...', 0, 1);
 
-  const dailyReturns: number[][] = []; // [asset][day]
+  const dailyReturns: number[][] = [];
 
   for (const id of validIds) {
     const prices = closePrices.get(id)!;
@@ -109,35 +108,21 @@ export async function fetchOptimizationData(
     for (let t = 1; t < commonDates.length; t++) {
       const prevClose = prices.get(commonDates[t - 1]!)!;
       const currClose = prices.get(commonDates[t]!)!;
-      if (prevClose > 0) {
-        returns.push(Math.log(currClose / prevClose));
-      } else {
-        returns.push(0);
-      }
+      returns.push(prevClose > 0 ? Math.log(currClose / prevClose) : 0);
     }
     dailyReturns.push(returns);
   }
 
-  const T = dailyReturns[0]!.length; // number of return observations
+  const T = dailyReturns[0]!.length;
 
-  // Phase 4: Compute statistics
   onProgress?.('Computing covariance matrix...', 0, 1);
 
   const nAssets = validIds.length;
+  const dailyMeans = dailyReturns.map((returns) => returns.reduce((s, r) => s + r, 0) / T);
+  const tradingDays = validSymbols.map(({ typeId }) => (typeId !== undefined && CRYPTO_TYPE_IDS.has(typeId) ? 365 : 252));
+  const meanReturns = dailyMeans.map((m, i) => m * tradingDays[i]!);
 
-  // Mean daily returns
-  const dailyMeans = dailyReturns.map((returns) => {
-    const sum = returns.reduce((s, r) => s + r, 0);
-    return sum / T;
-  });
-
-  // Annualized mean returns
-  const meanReturns = dailyMeans.map((m) => m * TRADING_DAYS_PER_YEAR);
-
-  // Covariance matrix (sample, annualized)
-  const covarianceMatrix: number[][] = Array.from({ length: nAssets }, () =>
-    new Array(nAssets).fill(0),
-  );
+  const covarianceMatrix: number[][] = Array.from({ length: nAssets }, () => new Array(nAssets).fill(0));
 
   for (let i = 0; i < nAssets; i++) {
     for (let j = i; j < nAssets; j++) {
@@ -145,19 +130,18 @@ export async function fetchOptimizationData(
       for (let t = 0; t < T; t++) {
         cov += (dailyReturns[i]![t]! - dailyMeans[i]!) * (dailyReturns[j]![t]! - dailyMeans[j]!);
       }
-      cov = (cov / (T - 1)) * TRADING_DAYS_PER_YEAR; // annualize
-      covarianceMatrix[i]![j] = cov;
-      covarianceMatrix[j]![i] = cov; // symmetric
+      cov /= (T - 1);
+      const annualizedCov = i === j
+        ? cov * tradingDays[i]!
+        : cov * Math.sqrt(tradingDays[i]! * tradingDays[j]!);
+      covarianceMatrix[i]![j] = annualizedCov;
+      covarianceMatrix[j]![i] = annualizedCov;
     }
   }
 
-  // Volatilities (annualized)
-  const volatilities = covarianceMatrix.map((row, i) => Math.sqrt(row[i]!));
+  const volatilities = covarianceMatrix.map((row, i) => Math.sqrt(Math.max(0, row[i]!)));
 
-  // Correlation matrix
-  const correlationMatrix: number[][] = Array.from({ length: nAssets }, () =>
-    new Array(nAssets).fill(0),
-  );
+  const correlationMatrix: number[][] = Array.from({ length: nAssets }, () => new Array(nAssets).fill(0));
   for (let i = 0; i < nAssets; i++) {
     for (let j = 0; j < nAssets; j++) {
       const denom = volatilities[i]! * volatilities[j]!;
@@ -169,12 +153,13 @@ export async function fetchOptimizationData(
 
   return {
     instrumentIds: validIds,
-    symbols: validSymbols,
+    symbols: validSymbols.map(({ symbol }) => symbol),
     dailyReturns,
     meanReturns,
     covarianceMatrix,
     volatilities,
     correlationMatrix,
+    tradingDays,
     dataPoints: T,
     missingInstruments,
   };
@@ -186,47 +171,58 @@ export async function fetchOptimizationData(
 export function createMockOptimizationData(
   instrumentIds: number[],
   symbols: string[],
+  instrumentTypeIds?: number[],
 ): OptimizationData {
   const n = instrumentIds.length;
+  const tradingDays = symbols.map((_, i) => (instrumentTypeIds?.[i] !== undefined && CRYPTO_TYPE_IDS.has(instrumentTypeIds[i]!) ? 365 : 252));
 
-  // Generate plausible mock covariance matrix
-  const volatilities = symbols.map((s) => {
-    if (s.includes('BTC') || s.includes('ETH')) return 0.65;
-    if (s === 'CASH') return 0.0;
-    return 0.15 + Math.random() * 0.25;
+  const dailyVols = symbols.map((s, i) => {
+    if (s.includes('BTC') || s.includes('ETH') || (instrumentTypeIds?.[i] !== undefined && CRYPTO_TYPE_IDS.has(instrumentTypeIds[i]!))) return 0.65 / Math.sqrt(tradingDays[i]!);
+    if (s === 'CASH') return 0;
+    return (0.15 + Math.random() * 0.25) / Math.sqrt(tradingDays[i]!);
   });
 
-  const covarianceMatrix: number[][] = Array.from({ length: n }, (_, i) =>
+  const dailyCovariance: number[][] = Array.from({ length: n }, (_, i) =>
     Array.from({ length: n }, (_, j) => {
-      if (i === j) return volatilities[i]! ** 2;
+      if (i === j) return dailyVols[i]! ** 2;
       const corr = 0.2 + Math.random() * 0.4;
-      return corr * volatilities[i]! * volatilities[j]!;
+      return corr * dailyVols[i]! * dailyVols[j]!;
     }),
   );
 
+  const covarianceMatrix: number[][] = Array.from({ length: n }, () => new Array(n).fill(0));
+  for (let i = 0; i < n; i++) {
+    for (let j = 0; j < n; j++) {
+      covarianceMatrix[i]![j] = i === j
+        ? dailyCovariance[i]![j]! * tradingDays[i]!
+        : dailyCovariance[i]![j]! * Math.sqrt(tradingDays[i]! * tradingDays[j]!);
+    }
+  }
+
+  const volatilities = covarianceMatrix.map((row, i) => Math.sqrt(Math.max(0, row[i]!)));
   const correlationMatrix: number[][] = Array.from({ length: n }, (_, i) =>
     Array.from({ length: n }, (_, j) => {
       if (i === j) return 1;
-      return covarianceMatrix[i]![j]! / (volatilities[i]! * volatilities[j]!);
+      const denom = volatilities[i]! * volatilities[j]!;
+      return denom > 0 ? covarianceMatrix[i]![j]! / denom : 0;
     }),
   );
 
-  const meanReturns = symbols.map((s) => {
-    if (s.includes('BTC') || s.includes('ETH')) return 0.15 + Math.random() * 0.2;
-    if (s === 'CASH') return 0.0;
-    return 0.05 + Math.random() * 0.15;
+  const dailyMeans = symbols.map((s, i) => {
+    if (s.includes('BTC') || s.includes('ETH') || (instrumentTypeIds?.[i] !== undefined && CRYPTO_TYPE_IDS.has(instrumentTypeIds[i]!))) return (0.15 + Math.random() * 0.2) / tradingDays[i]!;
+    if (s === 'CASH') return 0;
+    return (0.05 + Math.random() * 0.15) / tradingDays[i]!;
   });
 
   return {
     instrumentIds,
     symbols,
-    dailyReturns: Array.from({ length: n }, () =>
-      Array.from({ length: 250 }, () => (Math.random() - 0.5) * 0.04),
-    ),
-    meanReturns,
+    dailyReturns: Array.from({ length: n }, () => Array.from({ length: 250 }, () => (Math.random() - 0.5) * 0.04)),
+    meanReturns: dailyMeans.map((m, i) => m * tradingDays[i]!),
     covarianceMatrix,
     volatilities,
     correlationMatrix,
+    tradingDays,
     dataPoints: 250,
     missingInstruments: [],
   };

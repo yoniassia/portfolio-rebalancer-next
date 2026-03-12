@@ -5,3 +5,4 @@ node_modules/
 ecosystem.config.cjs
 .credentials/
 .sessions/
+.rebalancer-sessions/

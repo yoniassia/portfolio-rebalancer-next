@@ -11,9 +11,7 @@ import {
   type ExecutionSummary,
   type OptimizationMethod,
   type OptimizationResult,
-  type ServiceMode,
-  type ActivationMode,
-  type AutonomyLevel,
+  type BacktestResult,
 } from '../types/rebalancer';
 
 export interface RebalanceState {
@@ -26,18 +24,7 @@ export interface RebalanceState {
   userKey: string;
   mode: 'demo' | 'real' | 'sso';
 
-  // Configuration (Step 1)
-  serviceMode: ServiceMode;
-  activationMode: ActivationMode;
-  autonomyLevel: AutonomyLevel;
-  driftThreshold: number;
-  cryptoThreshold: number;
-  scheduleFrequency: 'weekly' | 'monthly' | 'quarterly';
-  scheduleDayOfWeek: number;
-  scheduleDayOfMonth: number;
-  scheduleHour: number;
-
-  // Portfolio (Step 2)
+  // Portfolio (Step 1)
   portfolio: PortfolioAnalysis | null;
   portfolioSnapshot: PortfolioAnalysis | null;
 
@@ -47,32 +34,34 @@ export interface RebalanceState {
   riskLevel: 1 | 2 | 3 | 4 | 5 | null;
   isOptimizing: boolean;
   optimizationProgress: { phase: string; current: number; total: number } | null;
+  addNewInstruments: boolean;
+  newInstrumentCount: number;
 
-  // Target (Step 3)
+  // Target allocations (from optimization)
   targetAllocations: TargetAllocation[];
-  allocationMode: 'manual' | 'csv';
 
-  // Backtest (Step 4)
-  backtestResult: any | null;
-  backtestLoading: boolean;
-  backtestError: string | null;
-  rebalanceFrequency: 'monthly' | 'quarterly' | 'semi-annual' | 'annual';
-  backtestPeriod: number;
-  transactionCost: number;
-  advancedOptParams: any;
+  // Backtest (inline in optimize step)
+  backtestResult: BacktestResult | null;
+  currentBacktest: BacktestResult | null;
 
-  // Validation (Step 5)
+  // Validation
   validationResults: InstrumentValidation[];
   isValidating: boolean;
 
-  // Execution (Step 5)
+  // Execution (Step 3)
   executionPlan: RebalancePlan | null;
   executionProgress: TradeProgress[];
   executionPhase: ExecutionPhase;
+  driftThreshold: number;
+  maxPositionWeight: number;
+  slippageTolerance: number;
 
-  // Results (Step 6)
+  // Results (Step 4)
   finalPortfolio: PortfolioAnalysis | null;
   executionSummary: ExecutionSummary | null;
+
+  // Policy (in results step)
+  policyFrequency: 'monthly' | 'quarterly' | 'notify' | 'manual';
 
   // Actions
   setStep: (step: RebalanceStep) => void;
@@ -80,16 +69,6 @@ export interface RebalanceState {
 
   setConnection: (apiKey: string, userKey: string, mode: 'demo' | 'real' | 'sso') => void;
   setConnected: (connected: boolean) => void;
-
-  setServiceMode: (mode: ServiceMode) => void;
-  setActivationMode: (mode: ActivationMode) => void;
-  setAutonomyLevel: (level: AutonomyLevel) => void;
-  setDriftThreshold: (threshold: number) => void;
-  setCryptoThreshold: (threshold: number) => void;
-  setScheduleFrequency: (freq: 'weekly' | 'monthly' | 'quarterly') => void;
-  setScheduleDayOfWeek: (day: number) => void;
-  setScheduleDayOfMonth: (day: number) => void;
-  setScheduleHour: (hour: number) => void;
 
   setPortfolio: (portfolio: PortfolioAnalysis) => void;
   snapshotPortfolio: () => void;
@@ -99,22 +78,12 @@ export interface RebalanceState {
   setRiskLevel: (level: 1 | 2 | 3 | 4 | 5 | null) => void;
   setIsOptimizing: (optimizing: boolean) => void;
   setOptimizationProgress: (progress: { phase: string; current: number; total: number } | null) => void;
+  setAddNewInstruments: (add: boolean) => void;
+  setNewInstrumentCount: (count: number) => void;
 
   setTargetAllocations: (allocations: TargetAllocation[]) => void;
-  updateAllocation: (index: number, weight: number) => void;
-  addAllocation: (allocation: TargetAllocation) => void;
-  removeAllocation: (index: number) => void;
-  setAllocationMode: (mode: 'manual' | 'csv') => void;
-  equalizeWeights: () => void;
-
-  setRebalanceFrequency: (freq: 'monthly' | 'quarterly' | 'semi-annual' | 'annual') => void;
-  setBacktestPeriod: (period: number) => void;
-  setTransactionCost: (cost: number) => void;
-  setAdvancedOptParams: (params: any) => void;
-  runBacktest: () => Promise<void>;
-  setBacktestResult: (result: any) => void;
-  setBacktestLoading: (loading: boolean) => void;
-  setBacktestError: (error: string | null) => void;
+  setBacktestResult: (result: BacktestResult | null) => void;
+  setCurrentBacktest: (result: BacktestResult | null) => void;
 
   setValidationResults: (results: InstrumentValidation[]) => void;
   setIsValidating: (validating: boolean) => void;
@@ -123,14 +92,18 @@ export interface RebalanceState {
   updateTradeProgress: (trade: TradeProgress, index: number) => void;
   setExecutionPhase: (phase: ExecutionPhase) => void;
   setExecutionProgress: (progress: TradeProgress[]) => void;
+  setDriftThreshold: (threshold: number) => void;
+  setMaxPositionWeight: (weight: number) => void;
+  setSlippageTolerance: (tolerance: number) => void;
 
   executeRebalance: () => Promise<void>;
 
   setFinalPortfolio: (portfolio: PortfolioAnalysis) => void;
   setExecutionSummary: (summary: ExecutionSummary) => void;
+  setPolicyFrequency: (freq: 'monthly' | 'quarterly' | 'notify' | 'manual') => void;
 
   reset: () => void;
-  resetFromTarget: () => void;
+  resetOptimization: () => void;
 }
 
 const initialState = {
@@ -138,16 +111,7 @@ const initialState = {
   isConnected: false,
   apiKey: '',
   userKey: '',
-  mode: 'demo' as const,
-  serviceMode: 'auto' as ServiceMode,
-  activationMode: 'trigger' as ActivationMode,
-  autonomyLevel: 'approve' as AutonomyLevel,
-  driftThreshold: 4,
-  cryptoThreshold: 8,
-  scheduleFrequency: 'monthly' as const,
-  scheduleDayOfWeek: 1,
-  scheduleDayOfMonth: 1,
-  scheduleHour: 10,
+  mode: 'sso' as 'demo' | 'real' | 'sso',
   portfolio: null,
   portfolioSnapshot: null,
   optimizationMethod: null,
@@ -155,22 +119,22 @@ const initialState = {
   riskLevel: null,
   isOptimizing: false,
   optimizationProgress: null,
+  addNewInstruments: true,
+  newInstrumentCount: 3,
   targetAllocations: [] as TargetAllocation[],
-  allocationMode: 'manual' as const,
   backtestResult: null,
-  backtestLoading: false,
-  backtestError: null,
-  rebalanceFrequency: 'quarterly' as const,
-  backtestPeriod: 3,
-  transactionCost: 0.1,
-  advancedOptParams: {},
+  currentBacktest: null,
   validationResults: [] as InstrumentValidation[],
   isValidating: false,
   executionPlan: null,
   executionProgress: [] as TradeProgress[],
   executionPhase: 'idle' as ExecutionPhase,
+  driftThreshold: 5,
+  maxPositionWeight: 25,
+  slippageTolerance: 0.5,
   finalPortfolio: null,
   executionSummary: null,
+  policyFrequency: 'monthly' as const,
 };
 
 export const useRebalanceStore = create<RebalanceState>()(
@@ -189,16 +153,6 @@ export const useRebalanceStore = create<RebalanceState>()(
       setConnection: (apiKey, userKey, mode) => set({ apiKey, userKey, mode }),
       setConnected: (isConnected) => set({ isConnected }),
 
-      setServiceMode: (serviceMode) => set({ serviceMode }),
-      setActivationMode: (activationMode) => set({ activationMode }),
-      setAutonomyLevel: (autonomyLevel) => set({ autonomyLevel }),
-      setDriftThreshold: (driftThreshold) => set({ driftThreshold }),
-      setCryptoThreshold: (cryptoThreshold) => set({ cryptoThreshold }),
-      setScheduleFrequency: (scheduleFrequency) => set({ scheduleFrequency }),
-      setScheduleDayOfWeek: (scheduleDayOfWeek) => set({ scheduleDayOfWeek }),
-      setScheduleDayOfMonth: (scheduleDayOfMonth) => set({ scheduleDayOfMonth }),
-      setScheduleHour: (scheduleHour) => set({ scheduleHour }),
-
       setPortfolio: (portfolio) => set({ portfolio }),
       snapshotPortfolio: () => set({ portfolioSnapshot: get().portfolio }),
 
@@ -207,96 +161,12 @@ export const useRebalanceStore = create<RebalanceState>()(
       setRiskLevel: (riskLevel) => set({ riskLevel }),
       setIsOptimizing: (isOptimizing) => set({ isOptimizing }),
       setOptimizationProgress: (optimizationProgress) => set({ optimizationProgress }),
+      setAddNewInstruments: (addNewInstruments) => set({ addNewInstruments }),
+      setNewInstrumentCount: (newInstrumentCount) => set({ newInstrumentCount }),
 
       setTargetAllocations: (targetAllocations) => set({ targetAllocations }),
-      updateAllocation: (index, weight) => {
-        const { targetAllocations } = get();
-        const updated = [...targetAllocations];
-        const item = updated[index];
-        if (item) {
-          updated[index] = { ...item, weight };
-          set({ targetAllocations: updated });
-        }
-      },
-      addAllocation: (allocation) => {
-        set({ targetAllocations: [...get().targetAllocations, allocation] });
-      },
-      removeAllocation: (index) => {
-        const allocs = get().targetAllocations;
-        if (allocs[index]?.isCash) return;
-        set({ targetAllocations: allocs.filter((_, i) => i !== index) });
-      },
-      setAllocationMode: (allocationMode) => set({ allocationMode }),
-      equalizeWeights: () => {
-        const { targetAllocations } = get();
-        const cashAlloc = targetAllocations.find((a) => a.isCash);
-        const nonCash = targetAllocations.filter((a) => !a.isCash);
-        const cashWeight = cashAlloc?.weight ?? 0;
-        const perAsset = nonCash.length > 0 ? (1 - cashWeight) / nonCash.length : 0;
-        set({
-          targetAllocations: targetAllocations.map((a) =>
-            a.isCash ? a : { ...a, weight: perAsset },
-          ),
-        });
-      },
-
-      setRebalanceFrequency: (rebalanceFrequency) => set({ rebalanceFrequency }),
-      setBacktestPeriod: (backtestPeriod) => set({ backtestPeriod }),
-      setTransactionCost: (transactionCost) => set({ transactionCost }),
-      setAdvancedOptParams: (advancedOptParams) => set({ advancedOptParams }),
       setBacktestResult: (backtestResult) => set({ backtestResult }),
-      setBacktestLoading: (backtestLoading) => set({ backtestLoading }),
-      setBacktestError: (backtestError) => set({ backtestError }),
-      runBacktest: async () => {
-        const state = get();
-        set({ backtestLoading: true, backtestError: null });
-        
-        try {
-          // Build universe from portfolio holdings (API expects { universe: ["AAPL","GOOG",...] })
-          const universe = (state.portfolio?.holdings || [])
-            .map((h) => h.symbol)
-            .filter((s) => s && s !== 'CASH' && s !== 'USD');
-
-          // Map optimization method to goal
-          const goalMap: Record<string, string> = {
-            'equal-weight': 'balanced',
-            'min-variance': 'preserve',
-            'risk-parity': 'balanced',
-            'mvo': 'maximum',
-          };
-          const goal = goalMap[state.optimizationMethod || 'risk-parity'] || 'balanced';
-
-          const payload = {
-            universe,
-            goal,
-            rebalanceFreq: state.rebalanceFrequency === 'semi-annual' ? 'monthly' : state.rebalanceFrequency,
-            period: `${state.backtestPeriod}y`,
-            cash: state.portfolio?.totalValue || 100000,
-            stopLoss: 8,
-            takeProfit: 16,
-            maxPositionPct: 25,
-            spread: 0.15,
-          };
-
-          const response = await fetch('http://localhost:3047/api/backtest/run', {
-            method: 'POST',
-            credentials: 'include',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify(payload),
-          });
-
-          if (!response.ok) {
-            const errorData = await response.json().catch(() => ({ error: 'Unknown error' }));
-            throw new Error(errorData.error || `HTTP ${response.status}`);
-          }
-
-          const result = await response.json();
-          set({ backtestResult: result, backtestLoading: false });
-        } catch (error: any) {
-          console.error('[Backtest] Error:', error);
-          set({ backtestError: error.message || 'Failed to run backtest', backtestLoading: false });
-        }
-      },
+      setCurrentBacktest: (currentBacktest) => set({ currentBacktest }),
 
       setValidationResults: (validationResults) => set({ validationResults }),
       setIsValidating: (isValidating) => set({ isValidating }),
@@ -309,6 +179,9 @@ export const useRebalanceStore = create<RebalanceState>()(
       },
       setExecutionPhase: (executionPhase) => set({ executionPhase }),
       setExecutionProgress: (executionProgress) => set({ executionProgress }),
+      setDriftThreshold: (driftThreshold) => set({ driftThreshold }),
+      setMaxPositionWeight: (maxPositionWeight) => set({ maxPositionWeight }),
+      setSlippageTolerance: (slippageTolerance) => set({ slippageTolerance }),
 
       executeRebalance: async () => {
         const state = get();
@@ -328,7 +201,6 @@ export const useRebalanceStore = create<RebalanceState>()(
             updated[i] = { ...updated[i], status: 'executing' };
             set({ executionProgress: updated });
             await delay(2000);
-            const price = 50 + Math.random() * 200;
             updated[i] = {
               ...updated[i],
               status: 'success',
@@ -402,10 +274,14 @@ export const useRebalanceStore = create<RebalanceState>()(
 
       setFinalPortfolio: (finalPortfolio) => set({ finalPortfolio }),
       setExecutionSummary: (executionSummary) => set({ executionSummary }),
+      setPolicyFrequency: (policyFrequency) => set({ policyFrequency }),
 
       reset: () => set(initialState),
-      resetFromTarget: () =>
+      resetOptimization: () =>
         set({
+          optimizationResult: null,
+          backtestResult: null,
+          currentBacktest: null,
           targetAllocations: [],
           validationResults: [],
           executionPlan: null,
@@ -413,9 +289,6 @@ export const useRebalanceStore = create<RebalanceState>()(
           executionPhase: 'idle',
           finalPortfolio: null,
           executionSummary: null,
-          optimizationMethod: null,
-          optimizationResult: null,
-          riskLevel: null,
         }),
     }),
     {
@@ -427,19 +300,14 @@ export const useRebalanceStore = create<RebalanceState>()(
         userKey: state.userKey,
         mode: state.mode,
         isConnected: state.isConnected,
-        serviceMode: state.serviceMode,
-        activationMode: state.activationMode,
-        autonomyLevel: state.autonomyLevel,
-        driftThreshold: state.driftThreshold,
-        cryptoThreshold: state.cryptoThreshold,
-        scheduleFrequency: state.scheduleFrequency,
-        scheduleDayOfWeek: state.scheduleDayOfWeek,
-        scheduleDayOfMonth: state.scheduleDayOfMonth,
-        scheduleHour: state.scheduleHour,
-        targetAllocations: state.targetAllocations,
-        allocationMode: state.allocationMode,
         riskLevel: state.riskLevel,
         optimizationMethod: state.optimizationMethod,
+        addNewInstruments: state.addNewInstruments,
+        newInstrumentCount: state.newInstrumentCount,
+        driftThreshold: state.driftThreshold,
+        maxPositionWeight: state.maxPositionWeight,
+        slippageTolerance: state.slippageTolerance,
+        policyFrequency: state.policyFrequency,
       }),
       skipHydration: true,
     },

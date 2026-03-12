@@ -1,14 +1,10 @@
 // ── Navigation ──────────────────────────────────────────
 export enum RebalanceStep {
   Connect = 0,
-  Configure = 1,
-  Portfolio = 2,
-  Optimize = 3,
-  Target = 4,
-  Backtest = 5,
-  Validation = 6,
-  Execution = 7,
-  Results = 8,
+  Portfolio = 1,
+  Optimize = 2,
+  Execute = 3,
+  Results = 4,
 }
 
 // ── Service Configuration ───────────────────────────────
@@ -47,15 +43,23 @@ export interface PortfolioHolding {
   investedAmount: number;
   weight: number;
   pnl: number;
+  effectiveExposure?: number;
+  instrumentTypeId?: number;
+  isCopy?: boolean;
+  isMixed?: boolean;
 }
 
 export interface PortfolioAnalysis {
   holdings: PortfolioHolding[];
+  directHoldings?: PortfolioHolding[];
+  copyHoldings?: PortfolioHolding[];
   totalValue: number;
   investedValue: number;
   availableCash: number;
+  totalPnL?: number;
   cashWeight: number;
   timestamp: string;
+  directEquity?: number;
 }
 
 // ── Target Allocation ──────────────────────────────────
@@ -137,7 +141,7 @@ export interface ExecutionSummary {
 }
 
 // ── Optimization ───────────────────────────────────────
-export type OptimizationMethod = 'equal-weight' | 'min-variance' | 'risk-parity' | 'mvo';
+export type OptimizationMethod = 'equal-weight' | 'min-variance' | 'risk-parity' | 'mvo' | 'market-cap';
 
 export interface OptimizationData {
   instrumentIds: number[];
@@ -147,7 +151,28 @@ export interface OptimizationData {
   covarianceMatrix: number[][];
   volatilities: number[];
   correlationMatrix: number[][];
+  tradingDays?: number[];
   dataPoints: number;
+}
+
+export interface OptimizationRecommendation {
+  instrumentId: number;
+  symbol: string;
+  displayName?: string;
+  targetWeight: number;
+  currentWeight?: number;
+  reason?: string;
+  diversificationScore?: number;
+  compositeScore?: number;
+  momentumScore?: number;
+  oneYearPriceChange?: number;
+}
+
+export interface OptimizationConstraints {
+  maxWeight: number;
+  minWeight: number;
+  m: number;
+  n: number;
 }
 
 export interface OptimizationResult {
@@ -167,6 +192,15 @@ export interface OptimizationResult {
     dataPoints: number;
     missingInstruments: string[];
   };
+  newRecommendations?: OptimizationRecommendation[];
+  existingReweighted?: OptimizationRecommendation[];
+  constraints?: OptimizationConstraints;
+  marketCapCoverage?: {
+    confirmed: number;
+    estimated: number;
+  };
+  backtest?: BacktestResult;
+  currentBacktest?: BacktestResult;
 }
 
 export interface RiskProfile {
@@ -177,6 +211,21 @@ export interface RiskProfile {
   description: string;
   expectedVolRange: [number, number];
   maxDrawdownGuide: number;
+}
+
+// ── Backtest ───────────────────────────────────────────
+export interface BacktestResult {
+  equity_curve: [number, number][];
+  benchmark_curve: [number, number][];
+  total_return_pct: number;
+  annualized_return: number;
+  volatility: number;
+  sharpe_ratio: number;
+  max_drawdown_pct: number;
+  benchmark_return_pct: number;
+  benchmark_sharpe: number;
+  total_trades: number;
+  total_spread_cost: number;
 }
 
 // ── Auto-Rebalance Config ──────────────────────────────

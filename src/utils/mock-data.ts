@@ -6,6 +6,7 @@ import type {
   TradeProgress,
   ExecutionSummary,
   OptimizationResult,
+  TradeAction,
 } from '../types/rebalancer';
 
 export function createMockPortfolio(): PortfolioAnalysis {
@@ -138,5 +139,73 @@ export function createMockOptimizationResult(): OptimizationResult {
       dataPoints: 252,
       missingInstruments: [],
     },
+  };
+}
+
+export function createMockValidation(allocations: TargetAllocation[]): InstrumentValidation[] {
+  return allocations.filter(a => !a.isCash).map(a => ({
+    symbol: a.symbol,
+    instrumentId: a.instrumentId,
+    displayName: a.displayName,
+    isValid: true,
+    isOpen: true,
+    isTradable: true,
+    isBuyEnabled: true,
+    status: 'valid' as const,
+  }));
+}
+
+export function createMockPlanFromAllocations(allocations: TargetAllocation[], portfolio: PortfolioAnalysis | null): RebalancePlan {
+  const totalValue = portfolio?.totalValue ?? 10000;
+  const holdings = portfolio?.holdings ?? [];
+
+  const fullCloses: RebalancePlan['fullCloses'] = holdings
+    .filter(h => !allocations.find(a => a.symbol === h.symbol))
+    .map(h => ({
+      symbol: h.symbol,
+      instrumentId: h.instrumentId,
+      action: 'full-close' as TradeAction,
+      amount: h.totalValue,
+      reason: 'Not in target allocation',
+    }));
+
+  const partialCloses: RebalancePlan['partialCloses'] = allocations
+    .filter(a => !a.isCash)
+    .flatMap(a => {
+      const holding = holdings.find(h => h.instrumentId === a.instrumentId);
+      if (!holding || holding.weight <= a.weight) return [];
+      return [{
+        symbol: a.symbol,
+        instrumentId: a.instrumentId ?? 0,
+        action: 'partial-close' as TradeAction,
+        amount: (holding.weight - a.weight) * totalValue,
+        reason: `Reduce from ${(holding.weight * 100).toFixed(1)}% to ${(a.weight * 100).toFixed(1)}%`,
+      }];
+    });
+
+  const opens: RebalancePlan['opens'] = allocations
+    .filter(a => !a.isCash)
+    .flatMap(a => {
+      const holding = holdings.find(h => h.instrumentId === a.instrumentId);
+      if (holding && holding.weight >= a.weight) return [];
+      return [{
+        symbol: a.symbol,
+        instrumentId: a.instrumentId ?? 0,
+        action: 'buy' as TradeAction,
+        amount: a.weight * totalValue - (holding?.totalValue ?? 0),
+        reason: `Buy to reach ${(a.weight * 100).toFixed(1)}%`,
+      }];
+    });
+
+  const cashFromCloses = [...fullCloses, ...partialCloses].reduce((s, t) => s + t.amount, 0);
+  const cashNeeded = opens.reduce((s, t) => s + t.amount, 0);
+
+  return {
+    fullCloses,
+    partialCloses,
+    opens,
+    estimatedCashFromCloses: cashFromCloses,
+    estimatedCashNeeded: cashNeeded,
+    estimatedCashAfter: (portfolio?.availableCash ?? 0) + cashFromCloses - cashNeeded,
   };
 }
