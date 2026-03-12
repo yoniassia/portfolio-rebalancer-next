@@ -20,11 +20,8 @@ interface ExecuteBody {
 
 type Mode = 'real' | 'demo';
 
-// eToro API quirk: demo uses /demo/ prefix, real uses NO prefix
 function executionPath(mode: Mode, endpoint: string): string {
-  return mode === 'demo'
-    ? `/api/v1/trading/execution/demo/${endpoint}`
-    : `/api/v1/trading/execution/${endpoint}`;
+  return `/api/v1/trading/execution/${mode}/${endpoint}`;
 }
 
 function makeHeaders(bearerToken: string) {
@@ -40,6 +37,7 @@ const MAX_RETRIES = 2;
 const RETRY_DELAY_MS = 1500;
 
 async function etoroCall(method: string, path: string, body: any, bearerToken: string, retries = MAX_RETRIES): Promise<any> {
+  const url = `${BASE}${path}`;
   const opts: RequestInit = {
     method,
     headers: makeHeaders(bearerToken),
@@ -47,10 +45,20 @@ async function etoroCall(method: string, path: string, body: any, bearerToken: s
   if (body) opts.body = JSON.stringify(body);
 
   for (let attempt = 0; attempt <= retries; attempt++) {
-    const res = await fetch(`${BASE}${path}`, opts);
+    console.log(`[execute] ${method} ${url}${attempt > 0 ? ` (retry ${attempt})` : ''}`);
+    const res = await fetch(url, opts);
     const text = await res.text();
 
-    if (res.ok) return text ? JSON.parse(text) : {};
+    if (res.ok) {
+      console.log(`[execute] ✅ ${method} ${path} → ${res.status}`);
+      return text ? JSON.parse(text) : {};
+    }
+
+    console.error(`[execute] ❌ ${method} ${path} → ${res.status}: ${text.slice(0, 200)}`);
+
+    if (res.status === 401 || res.status === 403) {
+      throw new Error(`AUTH_EXPIRED: eToro session expired (${res.status}). Please re-login.`);
+    }
 
     const isRetryable = res.status === 429 || res.status >= 500;
     if (isRetryable && attempt < retries) {

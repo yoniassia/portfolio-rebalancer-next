@@ -116,33 +116,58 @@ export function ExecuteStep({
         )}
 
         {/* Completion banner */}
-        {isComplete && (
-          <div style={{
-            borderRadius: 12, padding: 14, textAlign: 'center',
-            background: failCount === 0 ? 'rgba(0,200,83,0.12)' : failCount === trades.length ? 'rgba(239,68,68,0.12)' : 'rgba(245,158,11,0.12)',
-          }}>
-            <div style={{ fontSize: 18, fontWeight: 700, color: failCount === 0 ? '#00c853' : failCount === trades.length ? '#ef4444' : '#f59e0b' }}>
-              {failCount === 0 ? '✅ All Trades Executed' : failCount === trades.length ? '❌ All Trades Failed' : `⚠️ ${successCount}/${trades.length} Executed`}
-            </div>
-            <div className="mono" style={{ fontSize: 13, marginTop: 4, color: 'var(--text-secondary)' }}>
-              {successCount} succeeded · {failCount} failed · {trades.filter(t => t.status === 'skipped').length} skipped
-            </div>
-            {failCount > 0 && (
-              <div style={{ marginTop: 8 }}>
-                <button
-                  onClick={onExecute}
-                  style={{
-                    padding: '6px 16px', borderRadius: 8, fontSize: 12, fontWeight: 600,
-                    background: 'rgba(59,130,246,0.12)', color: '#3b82f6', border: '1px solid #3b82f630',
-                    cursor: 'pointer',
-                  }}
-                >
-                  🔄 Retry Failed Trades
-                </button>
+        {isComplete && (() => {
+          const skippedCount = trades.filter(t => t.status === 'skipped').length;
+          const authExpired = trades.some(t => t.error?.includes('session expired') || t.error?.includes('re-login'));
+          const marketClosed = trades.filter(t => t.error?.includes('Market closed'));
+          return (
+            <div style={{
+              borderRadius: 12, padding: 14, textAlign: 'center',
+              background: failCount === 0 ? 'rgba(0,200,83,0.12)' : failCount === trades.length ? 'rgba(239,68,68,0.12)' : 'rgba(245,158,11,0.12)',
+            }}>
+              <div style={{ fontSize: 18, fontWeight: 700, color: failCount === 0 ? '#00c853' : failCount === trades.length ? '#ef4444' : '#f59e0b' }}>
+                {failCount === 0 ? '✅ All Trades Executed' : failCount === trades.length ? '❌ All Trades Failed' : `⚠️ ${successCount}/${trades.length} Executed`}
               </div>
-            )}
-          </div>
-        )}
+              <div className="mono" style={{ fontSize: 13, marginTop: 4, color: 'var(--text-secondary)' }}>
+                {successCount} succeeded · {failCount} failed · {skippedCount} skipped
+              </div>
+              {authExpired && (
+                <div style={{ marginTop: 8, padding: '8px 12px', borderRadius: 8, background: 'rgba(239,68,68,0.08)', border: '1px solid #ef444430' }}>
+                  <div style={{ fontSize: 12, color: '#ef4444', fontWeight: 600, marginBottom: 6 }}>🔒 Session expired</div>
+                  <button
+                    onClick={() => { window.location.href = '/api/auth/login'; }}
+                    style={{
+                      padding: '6px 16px', borderRadius: 8, fontSize: 12, fontWeight: 600,
+                      background: 'rgba(59,130,246,0.12)', color: '#3b82f6', border: '1px solid #3b82f630',
+                      cursor: 'pointer',
+                    }}
+                  >
+                    🔑 Re-login to eToro
+                  </button>
+                </div>
+              )}
+              {marketClosed.length > 0 && (
+                <div style={{ marginTop: 8, padding: '8px 12px', borderRadius: 8, background: 'rgba(245,158,11,0.08)', border: '1px solid #f59e0b30', fontSize: 12, color: '#f59e0b' }}>
+                  🕐 {marketClosed.length} trade{marketClosed.length > 1 ? 's' : ''} skipped — market closed
+                </div>
+              )}
+              {failCount > 0 && !authExpired && (
+                <div style={{ marginTop: 8 }}>
+                  <button
+                    onClick={onExecute}
+                    style={{
+                      padding: '6px 16px', borderRadius: 8, fontSize: 12, fontWeight: 600,
+                      background: 'rgba(59,130,246,0.12)', color: '#3b82f6', border: '1px solid #3b82f630',
+                      cursor: 'pointer',
+                    }}
+                  >
+                    🔄 Retry Failed Trades
+                  </button>
+                </div>
+              )}
+            </div>
+          );
+        })()}
 
         {/* Trade Plan (idle state) */}
         {isIdle && plan && (

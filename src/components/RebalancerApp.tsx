@@ -261,6 +261,17 @@ export function RebalancerApp() {
           body: JSON.stringify({ trades: [trade], accountType }),
         });
         const data = await res.json();
+
+        if (res.status === 401) {
+          progressList[i] = { ...progressList[i]!, status: 'failed', error: 'Session expired — please re-login' };
+          store.setExecutionProgress([...progressList]);
+          for (let j = i + 1; j < allTrades.length; j++) {
+            progressList[j] = { ...progressList[j]!, status: 'skipped', error: 'Skipped — session expired' };
+          }
+          store.setExecutionProgress([...progressList]);
+          break;
+        }
+
         if (!res.ok) {
           throw new Error(data?.error ?? `HTTP ${res.status}`);
         }
@@ -274,10 +285,11 @@ export function RebalancerApp() {
           };
         } else {
           hasAnyFailure = true;
+          const errorMsg = result?.error ?? 'Unknown error from eToro';
           progressList[i] = {
             ...progressList[i]!,
-            status: 'failed',
-            error: result?.error ?? 'Unknown error from eToro',
+            status: errorMsg.includes('Market closed') ? 'skipped' : 'failed',
+            error: errorMsg,
           };
         }
       } catch (e: unknown) {
@@ -285,6 +297,9 @@ export function RebalancerApp() {
         progressList[i] = { ...progressList[i]!, status: 'failed', error: e instanceof Error ? e.message : 'Execution failed' };
       }
       store.setExecutionProgress([...progressList]);
+
+      // Inter-trade delay to avoid rate limiting
+      if (i < allTrades.length - 1) await new Promise(r => setTimeout(r, 500));
     }
 
     const successes = progressList.filter(t => t.status === 'success').length;
