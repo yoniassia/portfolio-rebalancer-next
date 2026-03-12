@@ -157,14 +157,16 @@ export function createMockValidation(allocations: TargetAllocation[]): Instrumen
 
 export function createMockPlanFromAllocations(allocations: TargetAllocation[], portfolio: PortfolioAnalysis | null): RebalancePlan {
   const totalValue = portfolio?.totalValue ?? 10000;
-  const holdings = portfolio?.holdings ?? [];
+  // Use directHoldings for rebalancing — copy positions are not rebalanceable
+  const holdings = portfolio?.directHoldings ?? portfolio?.holdings?.filter(h => !h.isCopy) ?? portfolio?.holdings ?? [];
 
   const fullCloses: RebalancePlan['fullCloses'] = holdings
-    .filter(h => !allocations.find(a => a.symbol === h.symbol))
+    .filter(h => !allocations.find(a => a.instrumentId === h.instrumentId || a.symbol === h.symbol))
     .map(h => ({
       symbol: h.symbol,
       instrumentId: h.instrumentId,
       action: 'full-close' as TradeAction,
+      positionId: h.positions?.[0]?.positionID,
       amount: h.totalValue,
       reason: 'Not in target allocation',
     }));
@@ -172,13 +174,19 @@ export function createMockPlanFromAllocations(allocations: TargetAllocation[], p
   const partialCloses: RebalancePlan['partialCloses'] = allocations
     .filter(a => !a.isCash)
     .flatMap(a => {
-      const holding = holdings.find(h => h.instrumentId === a.instrumentId);
+      const holding = holdings.find(h => h.instrumentId === (a.instrumentId ?? -1));
       if (!holding || holding.weight <= a.weight) return [];
+      const reduceAmount = (holding.weight - a.weight) * totalValue;
+      const totalUnits = holding.totalUnits || 1;
+      const unitPrice = holding.totalValue / totalUnits;
+      const unitsToDeduct = unitPrice > 0 ? Math.round((reduceAmount / unitPrice) * 1e6) / 1e6 : undefined;
       return [{
         symbol: a.symbol,
         instrumentId: a.instrumentId ?? 0,
         action: 'partial-close' as TradeAction,
-        amount: (holding.weight - a.weight) * totalValue,
+        positionId: holding.positions?.[0]?.positionID,
+        amount: reduceAmount,
+        units: unitsToDeduct,
         reason: `Reduce from ${(holding.weight * 100).toFixed(1)}% to ${(a.weight * 100).toFixed(1)}%`,
       }];
     });
@@ -186,14 +194,18 @@ export function createMockPlanFromAllocations(allocations: TargetAllocation[], p
   const opens: RebalancePlan['opens'] = allocations
     .filter(a => !a.isCash)
     .flatMap(a => {
-      const holding = holdings.find(h => h.instrumentId === a.instrumentId);
+      const holding = holdings.find(h => h.instrumentId === (a.instrumentId ?? -1));
       if (holding && holding.weight >= a.weight) return [];
+      const buyAmount = a.weight * totalValue - (holding?.totalValue ?? 0);
+      if (buyAmount < 1) return [];
       return [{
         symbol: a.symbol,
         instrumentId: a.instrumentId ?? 0,
         action: 'buy' as TradeAction,
-        amount: a.weight * totalValue - (holding?.totalValue ?? 0),
-        reason: `Buy to reach ${(a.weight * 100).toFixed(1)}%`,
+        amount: Math.round(buyAmount * 100) / 100,
+        reason: holding
+          ? `Increase from ${(holding.weight * 100).toFixed(1)}% to ${(a.weight * 100).toFixed(1)}%`
+          : `New position at ${(a.weight * 100).toFixed(1)}%`,
       }];
     });
 

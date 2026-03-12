@@ -7,9 +7,9 @@ const BASE = 'https://public-api.etoro.com';
 interface TradeRequest {
   action: 'buy' | 'full-close' | 'partial-close';
   instrumentId: number;
-  amount?: number;       // for buy
-  positionId?: number;   // for close
-  unitsToDeduct?: number | null; // for partial-close
+  amount?: number;
+  positionId?: number;
+  unitsToDeduct?: number | null;
   symbol?: string;
 }
 
@@ -18,8 +18,16 @@ interface ExecuteBody {
   accountType: 'real' | 'demo';
 }
 
+type Mode = 'real' | 'demo';
+
+// eToro API quirk: demo uses /demo/ prefix, real uses NO prefix
+function executionPath(mode: Mode, endpoint: string): string {
+  return mode === 'demo'
+    ? `/api/v1/trading/execution/demo/${endpoint}`
+    : `/api/v1/trading/execution/${endpoint}`;
+}
+
 function makeHeaders(bearerToken: string) {
-  // Execution endpoints use Bearer ONLY — mixing with x-api-key/x-user-key causes 422
   return {
     Authorization: `Bearer ${bearerToken}`,
     'x-request-id': randomUUID(),
@@ -28,16 +36,33 @@ function makeHeaders(bearerToken: string) {
   };
 }
 
-async function etoroCall(method: string, path: string, body: any, bearerToken: string) {
+const MAX_RETRIES = 2;
+const RETRY_DELAY_MS = 1500;
+
+async function etoroCall(method: string, path: string, body: any, bearerToken: string, retries = MAX_RETRIES): Promise<any> {
   const opts: RequestInit = {
     method,
     headers: makeHeaders(bearerToken),
   };
   if (body) opts.body = JSON.stringify(body);
-  const res = await fetch(`${BASE}${path}`, opts);
-  const text = await res.text();
-  if (!res.ok) throw new Error(`eToro ${res.status}: ${text.slice(0, 200)}`);
-  return text ? JSON.parse(text) : {};
+
+  for (let attempt = 0; attempt <= retries; attempt++) {
+    const res = await fetch(`${BASE}${path}`, opts);
+    const text = await res.text();
+
+    if (res.ok) return text ? JSON.parse(text) : {};
+
+    const isRetryable = res.status === 429 || res.status >= 500;
+    if (isRetryable && attempt < retries) {
+      const delay = RETRY_DELAY_MS * (attempt + 1);
+      console.warn(`[execute] Retrying ${path} (${res.status}) in ${delay}ms — attempt ${attempt + 1}/${retries}`);
+      await new Promise(r => setTimeout(r, delay));
+      continue;
+    }
+
+    throw new Error(`eToro ${res.status}: ${text.slice(0, 300)}`);
+  }
+  throw new Error('Unexpected: exhausted retries');
 }
 
 export async function POST(req: NextRequest) {
@@ -56,18 +81,55 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ error: 'No trades provided' }, { status: 400 });
     }
 
-    const mode = accountType; // 'demo' | 'real'
+    const mode: Mode = accountType;
     const results = [];
 
+    // Pre-flight: check market status for all instruments
+    const instrumentIds = [...new Set(trades.map(t => t.instrumentId))];
+    let closedInstruments = new Set<number>();
+    try {
+      const ETORO_API_KEY = process.env.ETORO_API_KEY || '';
+      const ETORO_USER_KEY = process.env.ETORO_USER_KEY || '';
+      const statusUrl = `${BASE}/api/v1/market-data/instruments?instrumentIds=${instrumentIds.join(',')}&fields=instrumentId,isMarketOpen,symbolFull`;
+      const statusRes = await fetch(statusUrl, {
+        headers: { 'x-api-key': ETORO_API_KEY, 'x-user-key': ETORO_USER_KEY, 'x-request-id': randomUUID() },
+      });
+      if (statusRes.ok) {
+        const statusData = await statusRes.json();
+        const instruments = statusData?.instruments ?? statusData ?? [];
+        for (const inst of instruments) {
+          if (inst.isMarketOpen === false) {
+            closedInstruments.add(inst.instrumentId);
+            console.warn(`[execute] Market CLOSED for ${inst.symbolFull ?? inst.instrumentId}`);
+          }
+        }
+      }
+    } catch (e) {
+      console.warn('[execute] Market status check failed, proceeding anyway:', (e as Error).message);
+    }
+
     for (const trade of trades) {
+      // Skip if market is closed
+      if (closedInstruments.has(trade.instrumentId)) {
+        console.log(`[execute] SKIPPED ${trade.symbol} (${trade.instrumentId}) — market closed`);
+        results.push({
+          instrumentId: trade.instrumentId,
+          symbol: trade.symbol,
+          action: trade.action,
+          status: 'error',
+          error: `Market closed for ${trade.symbol ?? trade.instrumentId}`,
+        });
+        continue;
+      }
+
       try {
         let orderResult: any;
 
         if (trade.action === 'buy') {
-          // Open a new position by amount
+          const path = executionPath(mode, 'market-open-orders/by-amount');
+          console.log(`[execute] BUY ${trade.symbol} (${trade.instrumentId}) $${trade.amount} → ${path}`);
           orderResult = await etoroCall(
-            'POST',
-            `/api/v1/trading/execution/${mode}/market-open-orders/by-amount`,
+            'POST', path,
             {
               InstrumentID: trade.instrumentId,
               IsBuy: true,
@@ -91,19 +153,21 @@ export async function POST(req: NextRequest) {
 
         } else if (trade.action === 'full-close' || trade.action === 'partial-close') {
           if (!trade.positionId) {
+            console.error(`[execute] Missing positionId for ${trade.action} on ${trade.symbol} (${trade.instrumentId})`);
             results.push({
               instrumentId: trade.instrumentId,
               symbol: trade.symbol,
               action: trade.action,
               status: 'error',
-              error: 'positionId required for close',
+              error: `Missing positionId — cannot ${trade.action} without it`,
             });
             continue;
           }
 
+          const path = executionPath(mode, `market-close-orders/positions/${trade.positionId}`);
+          console.log(`[execute] ${trade.action.toUpperCase()} ${trade.symbol} (${trade.instrumentId}) pos=${trade.positionId} → ${path}`);
           orderResult = await etoroCall(
-            'POST',
-            `/api/v1/trading/execution/${mode}/market-close-orders/positions/${trade.positionId}`,
+            'POST', path,
             {
               InstrumentId: trade.instrumentId,
               UnitsToDeduct: trade.unitsToDeduct ?? null,
@@ -120,7 +184,7 @@ export async function POST(req: NextRequest) {
         }
 
       } catch (err: any) {
-        console.error(`[execute] Trade failed for instrument ${trade.instrumentId}:`, err.message);
+        console.error(`[execute] Trade failed for ${trade.symbol} (${trade.instrumentId}):`, err.message);
         results.push({
           instrumentId: trade.instrumentId,
           symbol: trade.symbol,
@@ -133,7 +197,7 @@ export async function POST(req: NextRequest) {
 
     const okCount = results.filter(r => r.status === 'ok').length;
     const errCount = results.filter(r => r.status === 'error').length;
-    console.log(`[execute] ${okCount} ok, ${errCount} failed (mode: ${mode})`);
+    console.log(`[execute] Done: ${okCount} ok, ${errCount} failed (mode: ${mode})`);
 
     const response = NextResponse.json({ results, summary: { ok: okCount, errors: errCount, mode } });
     if (newCookie) {

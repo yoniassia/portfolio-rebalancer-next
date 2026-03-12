@@ -119,14 +119,28 @@ export function ExecuteStep({
         {isComplete && (
           <div style={{
             borderRadius: 12, padding: 14, textAlign: 'center',
-            background: phase === 'complete' ? 'rgba(0,200,83,0.12)' : 'rgba(239,68,68,0.12)',
+            background: failCount === 0 ? 'rgba(0,200,83,0.12)' : failCount === trades.length ? 'rgba(239,68,68,0.12)' : 'rgba(245,158,11,0.12)',
           }}>
-            <div style={{ fontSize: 18, fontWeight: 700, color: phase === 'complete' ? '#00c853' : '#ef4444' }}>
-              {phase === 'complete' ? '✅ Execution Complete' : '❌ Execution Failed'}
+            <div style={{ fontSize: 18, fontWeight: 700, color: failCount === 0 ? '#00c853' : failCount === trades.length ? '#ef4444' : '#f59e0b' }}>
+              {failCount === 0 ? '✅ All Trades Executed' : failCount === trades.length ? '❌ All Trades Failed' : `⚠️ ${successCount}/${trades.length} Executed`}
             </div>
             <div className="mono" style={{ fontSize: 13, marginTop: 4, color: 'var(--text-secondary)' }}>
-              {successCount} succeeded, {failCount} failed
+              {successCount} succeeded · {failCount} failed · {trades.filter(t => t.status === 'skipped').length} skipped
             </div>
+            {failCount > 0 && (
+              <div style={{ marginTop: 8 }}>
+                <button
+                  onClick={onExecute}
+                  style={{
+                    padding: '6px 16px', borderRadius: 8, fontSize: 12, fontWeight: 600,
+                    background: 'rgba(59,130,246,0.12)', color: '#3b82f6', border: '1px solid #3b82f630',
+                    cursor: 'pointer',
+                  }}
+                >
+                  🔄 Retry Failed Trades
+                </button>
+              </div>
+            )}
           </div>
         )}
 

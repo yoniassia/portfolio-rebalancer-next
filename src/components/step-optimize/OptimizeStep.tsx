@@ -393,11 +393,13 @@ export function OptimizeStep({ portfolio, onOptimize, onApply, isOptimizing, pro
                       </button>
                       <div style={{ flex: 1 }}>
                         <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
-                          <span className="mono" style={{ fontSize: 13, fontWeight: 700, color: 'var(--text-primary)' }}>{item.symbol}</span>
+                          <span style={{ fontSize: 13, fontWeight: 700, color: 'var(--text-primary)' }}>
+                            {item.displayName && item.displayName !== item.symbol ? item.displayName : item.symbol}
+                          </span>
                           <Badge variant={reasonLabel.variant}>{reasonLabel.label}</Badge>
                         </div>
                         <div style={{ fontSize: 11, color: 'var(--text-tertiary)', marginTop: 2 }}>
-                          {item.displayName}
+                          <span className="mono">{item.symbol}</span>
                           {typeof yearChange === 'number' && ` · ${yearChange > 0 ? '+' : ''}${yearChange.toFixed(1)}% 1yr`}
                         </div>
                       </div>

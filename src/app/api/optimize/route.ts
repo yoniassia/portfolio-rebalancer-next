@@ -42,10 +42,11 @@ interface CandlePoint {
   close: number;
 }
 
-async function fetchCandleHistory(token: string, instrumentId: number): Promise<CandlePoint[]> {
+async function fetchCandleHistory(instrumentId: number, apiKey: string, userKey: string): Promise<CandlePoint[]> {
   const res = await fetch(`${ETORO_BASE}/market-data/instruments/${instrumentId}/history/candles/desc/OneDay/756`, {
     headers: {
-      Authorization: `Bearer ${token}`,
+      'x-api-key': apiKey,
+      'x-user-key': userKey,
       'x-request-id': randomUUID(),
     },
   });
@@ -134,7 +135,7 @@ export async function POST(req: NextRequest) {
         candidates = await correlationPreScreen(
           stage1,
           heldIds,
-          session.accessToken,
+          { apiKey, userKey },
           targetCount,
         );
         console.log(`[optimize] correlationPreScreen returned ${candidates.length} candidates`);
@@ -144,13 +145,18 @@ export async function POST(req: NextRequest) {
       }
     }
 
-    // Always resolve ALL instrument symbols server-side (client data may be stale)
-    const allDirectIds = directHoldings.map((h) => h.instrumentId);
-    let resolvedSymbols: Record<number, string> = {};
-    if (allDirectIds.length > 0 && apiKey) {
+    // Resolve ALL instrument symbols + display names server-side (direct + candidates)
+    const allIds = [
+      ...directHoldings.map((h) => h.instrumentId),
+      ...candidates.map((c) => c.instrumentId),
+    ];
+    const resolvedSymbols: Record<number, string> = {};
+    const resolvedNames: Record<number, string> = {};
+    if (allIds.length > 0 && apiKey) {
       try {
-        for (let i = 0; i < allDirectIds.length; i += 100) {
-          const batch = allDirectIds.slice(i, i + 100);
+        const uniqueIds = [...new Set(allIds)];
+        for (let i = 0; i < uniqueIds.length; i += 100) {
+          const batch = uniqueIds.slice(i, i + 100);
           const res = await fetch(
             `${ETORO_BASE}/market-data/instruments?instrumentIds=${batch.join(',')}`,
             { headers: { 'x-api-key': apiKey, 'x-user-key': userKey, 'x-request-id': randomUUID() } },
@@ -158,10 +164,12 @@ export async function POST(req: NextRequest) {
           if (!res.ok) continue;
           const data = await res.json();
           for (const inst of data?.instrumentDisplayDatas ?? []) {
-            if (inst.symbolFull) resolvedSymbols[inst.instrumentID] = inst.symbolFull;
+            const id = inst.instrumentID ?? inst.instrumentId;
+            if (inst.symbolFull) resolvedSymbols[id] = inst.symbolFull;
+            if (inst.instrumentDisplayName) resolvedNames[id] = inst.instrumentDisplayName;
           }
         }
-        console.log(`[optimize] Resolved ${Object.keys(resolvedSymbols).length}/${allDirectIds.length} instrument symbols`);
+        console.log(`[optimize] Resolved ${Object.keys(resolvedSymbols).length}/${uniqueIds.length} symbols, ${Object.keys(resolvedNames).length} display names`);
       } catch (e) {
         console.warn(`[optimize] Symbol resolution failed: ${e instanceof Error ? e.message : e}`);
       }
@@ -187,29 +195,63 @@ export async function POST(req: NextRequest) {
     const missingInstruments: string[] = [];
     const candleResults = await mapWithConcurrency(allInstruments, CANDLE_CONCURRENCY, async (instrument) => {
       try {
-        const candles = await fetchCandleHistory(session.accessToken, instrument.instrumentId);
+        const candles = await fetchCandleHistory(instrument.instrumentId, apiKey, userKey);
         return { instrument, candles };
-      } catch {
+      } catch (e) {
+        console.warn(`[optimize] Candle fetch failed for ${instrument.symbol} (${instrument.instrumentId}): ${e instanceof Error ? e.message : e}`);
         missingInstruments.push(instrument.symbol);
         return { instrument, candles: [] as CandlePoint[] };
       }
     });
 
-    const valid = candleResults.filter((entry) => entry.candles.length > 0);
-    if (valid.length < 2) {
-      return NextResponse.json({ error: 'Not enough instruments with candle data', missingInstruments }, { status: 422 });
+    for (const r of candleResults) {
+      const first = r.candles[0]?.date ?? 'N/A';
+      const last = r.candles[r.candles.length - 1]?.date ?? 'N/A';
+      console.log(`[optimize] Candles: ${r.instrument.symbol} (${r.instrument.instrumentId}) → ${r.candles.length} days [${first} … ${last}]`);
     }
+
+    let valid = candleResults.filter((entry) => entry.candles.length >= 30);
+    if (valid.length < 2) {
+      return NextResponse.json({ error: `Not enough instruments with candle data (need 30+ days each). Got: ${candleResults.map(r => `${r.instrument.symbol}=${r.candles.length}`).join(', ')}`, missingInstruments }, { status: 422 });
+    }
+
+    // Progressively drop instruments with least overlap until we have 30+ common dates.
+    // Prioritize keeping existing (direct) holdings over candidates.
+    let commonDates: string[] = [];
+    const MIN_ALIGNED = 30;
+    for (let attempt = 0; attempt < 20 && valid.length >= 2; attempt++) {
+      const dateSets = valid.map((entry) => new Set(entry.candles.map((candle) => candle.date)));
+      commonDates = [...dateSets[0]!];
+      for (let i = 1; i < dateSets.length; i++) commonDates = commonDates.filter((date) => dateSets[i]!.has(date));
+      commonDates.sort((a, b) => a.localeCompare(b));
+
+      if (commonDates.length >= MIN_ALIGNED) break;
+
+      // Drop the instrument with the fewest dates, preferring to drop candidates over existing holdings
+      let worstIdx = -1;
+      let worstCount = Infinity;
+      for (let i = 0; i < valid.length; i++) {
+        const count = valid[i]!.candles.length;
+        const isExisting = valid[i]!.instrument.isExisting;
+        const adjustedCount = isExisting ? count + 100000 : count;
+        if (adjustedCount < worstCount) { worstCount = adjustedCount; worstIdx = i; }
+      }
+      if (worstIdx >= 0) {
+        const dropped = valid[worstIdx]!;
+        console.log(`[optimize] Dropping ${dropped.instrument.symbol} (${dropped.candles.length} dates) — insufficient overlap`);
+        missingInstruments.push(dropped.instrument.symbol);
+        valid = valid.filter((_, i) => i !== worstIdx);
+      }
+    }
+
+    if (commonDates.length < MIN_ALIGNED || valid.length < 2) {
+      const detail = valid.map((v) => `${v.instrument.symbol}(${v.candles.length}d)`).join(', ');
+      console.error(`[optimize] Alignment failed: ${commonDates.length} common dates across ${valid.length} instruments: ${detail}`);
+      return NextResponse.json({ error: `Insufficient aligned history (${commonDates.length} common dates across ${valid.length} instruments). Remaining: ${detail}. Missing: ${missingInstruments.join(', ')}`, missingInstruments }, { status: 422 });
+    }
+    console.log(`[optimize] Aligned ${commonDates.length} common dates across ${valid.length} instruments`);
 
     const validInstruments = valid.map((entry) => entry.instrument);
-    const dateSets = valid.map((entry) => new Set(entry.candles.map((candle) => candle.date)));
-    let commonDates = [...dateSets[0]!];
-    for (let i = 1; i < dateSets.length; i++) commonDates = commonDates.filter((date) => dateSets[i]!.has(date));
-    commonDates.sort((a, b) => a.localeCompare(b));
-
-    if (commonDates.length < 30) {
-      return NextResponse.json({ error: 'Insufficient aligned history', missingInstruments }, { status: 422 });
-    }
-
     const priceMaps = valid.map((entry) => new Map(entry.candles.map((candle) => [candle.date, candle.close])));
     const dailyReturns = priceMaps.map((prices) => {
       const returns: number[] = [];
@@ -314,10 +356,12 @@ export async function POST(req: NextRequest) {
           : momentumScore > 0.7 ? 'Momentum'
           : objective === 'preserve' ? 'Capital Preservation'
           : 'Risk Reducer';
+        const resolvedName = resolvedNames[instrument.instrumentId];
+        const resolvedSym = resolvedSymbols[instrument.instrumentId];
         return {
           instrumentId: instrument.instrumentId,
-          symbol: instrument.symbol,
-          displayName: candidate?.displayName ?? instrument.symbol,
+          symbol: resolvedSym ?? instrument.symbol,
+          displayName: resolvedName ?? candidate?.displayName ?? instrument.symbol,
           targetWeight: weights[index] ?? 0,
           diversificationScore: candidate?.diversScore ?? 0,
           compositeScore: candidate?.compositeScore ?? 0,

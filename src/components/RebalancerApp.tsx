@@ -184,12 +184,22 @@ export function RebalancerApp() {
     const plan = executionPlan ?? createMockPlanFromAllocations(targetAllocations, portfolio);
     if (!executionPlan) setExecutionPlan(plan);
 
+    // Ordered: full closes → partial closes → buys (frees cash first)
     const allTrades = [
-      ...plan.fullCloses.map((t) => ({ action: t.action, instrumentId: t.instrumentId, symbol: t.symbol, amount: t.amount,
-        positionId: portfolio?.holdings.find((h) => h.instrumentId === t.instrumentId)?.positions?.[0]?.positionID })),
-      ...plan.partialCloses.map((t) => ({ action: t.action, instrumentId: t.instrumentId, symbol: t.symbol, amount: t.amount,
-        positionId: portfolio?.holdings.find((h) => h.instrumentId === t.instrumentId)?.positions?.[0]?.positionID })),
-      ...plan.opens.map((t) => ({ action: t.action, instrumentId: t.instrumentId, symbol: t.symbol, amount: t.amount })),
+      ...plan.fullCloses.map((t) => ({
+        action: t.action, instrumentId: t.instrumentId, symbol: t.symbol, amount: t.amount,
+        positionId: t.positionId ?? portfolio?.holdings.find((h) => h.instrumentId === t.instrumentId)?.positions?.[0]?.positionID,
+        units: t.units, reason: t.reason,
+      })),
+      ...plan.partialCloses.map((t) => ({
+        action: t.action, instrumentId: t.instrumentId, symbol: t.symbol, amount: t.amount,
+        positionId: t.positionId ?? portfolio?.holdings.find((h) => h.instrumentId === t.instrumentId)?.positions?.[0]?.positionID,
+        units: t.units, unitsToDeduct: t.units, reason: t.reason,
+      })),
+      ...plan.opens.map((t) => ({
+        action: t.action, instrumentId: t.instrumentId, symbol: t.symbol, amount: t.amount,
+        reason: t.reason,
+      })),
     ];
 
     if (isDemo) {
@@ -199,7 +209,7 @@ export function RebalancerApp() {
         action: t.action as 'full-close' | 'partial-close' | 'buy',
         amount: t.amount ?? 0,
         status: 'pending' as const,
-        reason: t.action === 'buy' ? 'Opening position' : 'Closing position',
+        reason: t.reason ?? (t.action === 'buy' ? 'Opening position' : 'Closing position'),
       }));
       store.setExecutionProgress(progressList);
       await executeRebalance();
@@ -214,18 +224,35 @@ export function RebalancerApp() {
       action: t.action as 'full-close' | 'partial-close' | 'buy',
       amount: t.amount ?? 0,
       status: 'pending' as const,
-      reason: t.action === 'buy' ? 'Opening position' : 'Closing position',
+      reason: t.reason ?? (t.action === 'buy' ? 'Opening position' : 'Closing position'),
     }));
     store.setExecutionProgress(progressList);
-    store.setExecutionPhase('closing');
 
     const storedAccountType = (typeof window !== 'undefined' ? localStorage.getItem('etoro_account_type') : null) as 'real' | 'demo' | null;
     const accountType = storedAccountType ?? 'demo';
 
+    let hasAnyFailure = false;
+    const closeCount = plan.fullCloses.length + plan.partialCloses.length;
+
     for (let i = 0; i < allTrades.length; i++) {
       const trade = allTrades[i]!;
+
+      // Update execution phase based on trade type
+      if (trade.action === 'full-close') store.setExecutionPhase('closing');
+      else if (trade.action === 'partial-close') store.setExecutionPhase('partial-closing');
+      else if (trade.action === 'buy') {
+        // If closes failed, skip buys (no cash freed)
+        if (hasAnyFailure && i >= closeCount) {
+          progressList[i] = { ...progressList[i]!, status: 'skipped', error: 'Skipped — previous close trades failed' };
+          store.setExecutionProgress([...progressList]);
+          continue;
+        }
+        store.setExecutionPhase('opening');
+      }
+
       progressList[i] = { ...progressList[i]!, status: 'executing' };
       store.setExecutionProgress([...progressList]);
+
       try {
         const res = await fetch('/api/execute', {
           method: 'POST',
@@ -234,22 +261,46 @@ export function RebalancerApp() {
           body: JSON.stringify({ trades: [trade], accountType }),
         });
         const data = await res.json();
+        if (!res.ok) {
+          throw new Error(data?.error ?? `HTTP ${res.status}`);
+        }
         const result = data.results?.[0];
-        progressList[i] = {
-          ...progressList[i]!,
-          status: result?.status === 'ok' ? 'success' : 'failed',
-          error: result?.error,
-          orderId: result?.orderId,
-        };
+        if (result?.status === 'ok') {
+          progressList[i] = {
+            ...progressList[i]!,
+            status: 'success',
+            orderId: result?.orderId,
+            executedAt: new Date().toISOString(),
+          };
+        } else {
+          hasAnyFailure = true;
+          progressList[i] = {
+            ...progressList[i]!,
+            status: 'failed',
+            error: result?.error ?? 'Unknown error from eToro',
+          };
+        }
       } catch (e: unknown) {
+        hasAnyFailure = true;
         progressList[i] = { ...progressList[i]!, status: 'failed', error: e instanceof Error ? e.message : 'Execution failed' };
       }
       store.setExecutionProgress([...progressList]);
     }
 
-    store.setExecutionPhase('complete');
-    setFinalPortfolio(createMockPortfolio());
-    setStep(RebalanceStep.Results);
+    const successes = progressList.filter(t => t.status === 'success').length;
+    const failures = progressList.filter(t => t.status === 'failed').length;
+    store.setExecutionPhase(failures === progressList.length ? 'failed' : 'complete');
+    store.setExecutionSummary({
+      totalTrades: progressList.length,
+      successful: successes,
+      failed: failures,
+      skipped: progressList.filter(t => t.status === 'skipped').length,
+      totalFeesEstimate: 0,
+      startedAt: new Date().toISOString(),
+      completedAt: new Date().toISOString(),
+      trades: progressList,
+    });
+    // Stay on Execute step — user clicks "View Results" to proceed
   };
 
   const handleClearOptimizationResult = () => {

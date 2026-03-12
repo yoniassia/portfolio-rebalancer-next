@@ -104,6 +104,8 @@ export async function fetchCandidates(params: ExpansionParams): Promise<Candidat
   const data = await res.json();
   const instruments: SearchInstrument[] = data?.items ?? data?.instruments ?? [];
 
+  const MIN_POPULARITY = 500;
+
   const filtered = instruments.filter((instrument) => {
     const instrumentId = instrument.instrumentId ?? instrument.instrumentID;
     const instrumentTypeId = instrument.instrumentTypeID ?? instrument.instrumentTypeId ?? instrument.internalAssetClassId ?? 0;
@@ -113,6 +115,10 @@ export async function fetchCandidates(params: ExpansionParams): Promise<Candidat
     if (instrument.isInternalInstrument === true && instrument.isCurrentlyTradable !== true) return false;
     if (instrument.isCurrentlyTradable === false) return false;
     if (instrument.isBuyEnabled === false) return false;
+    const pop = instrument.popularityUniques7Day ?? instrument.popularityUniques ?? 0;
+    if (pop < MIN_POPULARITY) return false;
+    const sym = instrument.symbolFull ?? instrument.internalSymbolFull ?? '';
+    if (sym.startsWith('Drm.') || sym.startsWith('Drm ')) return false;
     if (params.assetTypeIds?.length && !params.assetTypeIds.includes(instrumentTypeId)) return false;
     return true;
   });
@@ -203,12 +209,16 @@ interface CandlePoint {
   close: number;
 }
 
-async function fetchShortCandles(token: string, instrumentId: number, days: number = 63): Promise<CandlePoint[]> {
+async function fetchShortCandles(auth: { apiKey: string; userKey: string } | string, instrumentId: number, days: number = 63): Promise<CandlePoint[]> {
+  const headers: Record<string, string> = { 'x-request-id': randomUUID() };
+  if (typeof auth === 'string') {
+    headers['Authorization'] = `Bearer ${auth}`;
+  } else {
+    headers['x-api-key'] = auth.apiKey;
+    headers['x-user-key'] = auth.userKey;
+  }
   const res = await fetch(`${ETORO_BASE}/market-data/instruments/${instrumentId}/history/candles/desc/OneDay/${days}`, {
-    headers: {
-      Authorization: `Bearer ${token}`,
-      'x-request-id': randomUUID(),
-    },
+    headers,
   });
   if (!res.ok) throw new Error(`Short candle fetch failed: ${res.status}`);
   const data = await res.json();
@@ -273,14 +283,14 @@ function pearsonCorrelation(a: number[], b: number[]): number {
 export async function correlationPreScreen(
   candidates: CandidateInstrument[],
   existingInstrumentIds: number[],
-  accessToken: string,
+  auth: { apiKey: string; userKey: string } | string,
   targetCount: number,
 ): Promise<CandidateInstrument[]> {
   if (candidates.length === 0) return [];
 
   const candidateCandles = await mapWithConcurrency(candidates, 5, async (c) => {
     try {
-      return { id: c.instrumentId, candles: await fetchShortCandles(accessToken, c.instrumentId) };
+      return { id: c.instrumentId, candles: await fetchShortCandles(auth, c.instrumentId) };
     } catch {
       return { id: c.instrumentId, candles: [] as CandlePoint[] };
     }
@@ -288,7 +298,7 @@ export async function correlationPreScreen(
 
   const existingCandles = await mapWithConcurrency(existingInstrumentIds, 5, async (id) => {
     try {
-      return { id, candles: await fetchShortCandles(accessToken, id) };
+      return { id, candles: await fetchShortCandles(auth, id) };
     } catch {
       return { id, candles: [] as CandlePoint[] };
     }
