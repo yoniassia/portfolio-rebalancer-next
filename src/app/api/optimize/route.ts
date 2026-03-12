@@ -144,10 +144,33 @@ export async function POST(req: NextRequest) {
       }
     }
 
+    // Always resolve ALL instrument symbols server-side (client data may be stale)
+    const allDirectIds = directHoldings.map((h) => h.instrumentId);
+    let resolvedSymbols: Record<number, string> = {};
+    if (allDirectIds.length > 0 && apiKey) {
+      try {
+        for (let i = 0; i < allDirectIds.length; i += 100) {
+          const batch = allDirectIds.slice(i, i + 100);
+          const res = await fetch(
+            `${ETORO_BASE}/market-data/instruments?instrumentIds=${batch.join(',')}`,
+            { headers: { 'x-api-key': apiKey, 'x-user-key': userKey, 'x-request-id': randomUUID() } },
+          );
+          if (!res.ok) continue;
+          const data = await res.json();
+          for (const inst of data?.instrumentDisplayDatas ?? []) {
+            if (inst.symbolFull) resolvedSymbols[inst.instrumentID] = inst.symbolFull;
+          }
+        }
+        console.log(`[optimize] Resolved ${Object.keys(resolvedSymbols).length}/${allDirectIds.length} instrument symbols`);
+      } catch (e) {
+        console.warn(`[optimize] Symbol resolution failed: ${e instanceof Error ? e.message : e}`);
+      }
+    }
+
     const allInstruments: OptimizeInstrument[] = [
       ...directHoldings.map((holding) => ({
         instrumentId: holding.instrumentId,
-        symbol: holding.symbol,
+        symbol: resolvedSymbols[holding.instrumentId] ?? holding.symbol,
         instrumentTypeId: holding.instrumentTypeId ?? 5,
         isExisting: true,
       })),

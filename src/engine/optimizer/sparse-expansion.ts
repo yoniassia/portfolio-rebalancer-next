@@ -88,7 +88,7 @@ function normalizeArray(values: number[]): number[] {
 export async function fetchCandidates(params: ExpansionParams): Promise<CandidateInstrument[]> {
   if (!params.apiKey || !params.userKey) return [];
 
-  const url = `${ETORO_BASE}/market-data/search?query=*&pageSize=100`;
+  const url = `${ETORO_BASE}/market-data/search?query=*&pageSize=500`;
   const res = await fetch(url, {
     headers: {
       'x-api-key': params.apiKey,
