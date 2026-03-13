@@ -6,3 +6,6 @@ ecosystem.config.cjs
 .credentials/
 .sessions/
 .rebalancer-sessions/
+.rebalancer-data/
+.rebalancer-executions/
+.rebalancer-policies/

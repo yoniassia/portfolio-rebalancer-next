@@ -5,7 +5,7 @@ import { Badge } from '../shared/Badge';
 import { BottomBar } from '../layout/BottomBar';
 import { formatCurrency, formatWeight } from '../../utils/format';
 import { PIE_COLORS, CASH_COLOR } from '../../constants/steps';
-import type { PortfolioAnalysis, ExecutionSummary } from '../../types/rebalancer';
+import type { PortfolioAnalysis, ExecutionSummary, TargetAllocation, OptimizationMethod } from '../../types/rebalancer';
 
 interface ResultsStepProps {
   before: PortfolioAnalysis | null;
@@ -14,6 +14,11 @@ interface ResultsStepProps {
   onReset: () => void;
   policyFrequency: 'monthly' | 'quarterly' | 'notify' | 'manual';
   onPolicyChange: (freq: 'monthly' | 'quarterly' | 'notify' | 'manual') => void;
+  targetAllocations?: TargetAllocation[];
+  optimizationMethod?: OptimizationMethod;
+  riskLevel?: 1 | 2 | 3 | 4 | 5;
+  driftThreshold?: number;
+  accountType?: 'demo' | 'real';
 }
 
 const POLICY_OPTIONS = [
@@ -23,8 +28,59 @@ const POLICY_OPTIONS = [
   { value: 'manual' as const, label: 'Manual Only', desc: 'I\'ll rebalance myself', icon: '✋', recommended: false },
 ];
 
-export function ResultsStep({ before, after, summary, onReset, policyFrequency, onPolicyChange }: ResultsStepProps) {
+export function ResultsStep({
+  before, after, summary, onReset, policyFrequency, onPolicyChange,
+  targetAllocations, optimizationMethod, riskLevel, driftThreshold, accountType,
+}: ResultsStepProps) {
   const [policyConfirmed, setPolicyConfirmed] = useState(false);
+  const [policyError, setPolicyError] = useState<string | null>(null);
+  const [policyLoading, setPolicyLoading] = useState(false);
+
+  const activatePolicy = async () => {
+    if (!targetAllocations?.length) {
+      setPolicyConfirmed(true);
+      return;
+    }
+
+    setPolicyLoading(true);
+    setPolicyError(null);
+    try {
+      const mode = policyFrequency === 'notify' ? 'drift' as const
+        : policyFrequency === 'manual' ? 'scheduled' as const
+        : 'both' as const;
+
+      const scheduleMap: Record<string, any> = {
+        monthly: { frequency: 'monthly', dayOfMonth: 1, hour: 8, minute: 0 },
+        quarterly: { frequency: 'quarterly', dayOfMonth: 1, hour: 8, minute: 0 },
+      };
+
+      const res = await fetch('/api/policies', {
+        method: 'POST',
+        credentials: 'include',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          targetAllocations,
+          optimizationMethod: optimizationMethod ?? 'equal-weight',
+          riskLevel: riskLevel ?? 3,
+          mode,
+          schedule: scheduleMap[policyFrequency] ?? undefined,
+          driftThreshold: driftThreshold ?? 0.05,
+          accountType: accountType ?? 'demo',
+        }),
+      });
+
+      if (!res.ok) {
+        const data = await res.json();
+        throw new Error(data?.error ?? `HTTP ${res.status}`);
+      }
+
+      setPolicyConfirmed(true);
+    } catch (e: any) {
+      setPolicyError(e.message);
+    } finally {
+      setPolicyLoading(false);
+    }
+  };
 
   return (
     <div className="flex flex-col flex-1">
@@ -167,19 +223,25 @@ export function ResultsStep({ before, after, summary, onReset, policyFrequency, 
           </div>
           {policyFrequency !== 'manual' && !policyConfirmed && (
             <button
-              onClick={() => setPolicyConfirmed(true)}
+              onClick={activatePolicy}
+              disabled={policyLoading}
               style={{
                 width: '100%', marginTop: 10, padding: '10px', borderRadius: 10,
-                background: '#6366f1', color: '#fff', border: 'none', cursor: 'pointer',
+                background: policyLoading ? '#6366f180' : '#6366f1', color: '#fff', border: 'none', cursor: policyLoading ? 'wait' : 'pointer',
                 fontSize: 13, fontWeight: 600,
               }}
             >
-              Activate {policyFrequency === 'notify' ? 'Drift Alerts' : `${policyFrequency.charAt(0).toUpperCase() + policyFrequency.slice(1)} Rebalancing`}
+              {policyLoading ? 'Activating...' : `Activate ${policyFrequency === 'notify' ? 'Drift Alerts' : `${policyFrequency.charAt(0).toUpperCase() + policyFrequency.slice(1)} Rebalancing`}`}
             </button>
+          )}
+          {policyError && (
+            <div style={{ marginTop: 10, padding: '8px 12px', borderRadius: 8, background: 'rgba(239,68,68,0.12)', border: '1px solid #ef444440', fontSize: 12, color: '#ef4444', textAlign: 'center' }}>
+              ❌ {policyError}
+            </div>
           )}
           {policyConfirmed && (
             <div style={{ marginTop: 10, padding: '8px 12px', borderRadius: 8, background: 'rgba(0,200,83,0.12)', border: '1px solid #00c85340', fontSize: 12, color: '#00c853', textAlign: 'center' }}>
-              ✅ {policyFrequency === 'notify' ? 'Drift alerts' : `${policyFrequency.charAt(0).toUpperCase() + policyFrequency.slice(1)} rebalancing`} activated
+              ✅ {policyFrequency === 'notify' ? 'Drift monitoring' : `${policyFrequency.charAt(0).toUpperCase() + policyFrequency.slice(1)} rebalancing`} activated — your portfolio will be automatically maintained
             </div>
           )}
         </div>

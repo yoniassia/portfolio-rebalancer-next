@@ -544,6 +544,11 @@ export function RebalancerApp() {
             onReset={reset}
             policyFrequency={policyFrequency}
             onPolicyChange={setPolicyFrequency}
+            targetAllocations={targetAllocations}
+            optimizationMethod={optimizationResult?.method}
+            riskLevel={store.riskLevel ?? undefined}
+            driftThreshold={driftThreshold / 100}
+            accountType={getAccountType()}
           />
         )}
       </StepTransition>
